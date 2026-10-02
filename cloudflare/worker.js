@@ -42,6 +42,7 @@ export class Account extends DurableObject {
       CREATE TABLE IF NOT EXISTS subscriptions (id INTEGER PRIMARY KEY, merchant TEXT NOT NULL, amount INTEGER NOT NULL, currency TEXT NOT NULL, frequency TEXT NOT NULL, first_due_on TEXT NOT NULL, auto_from TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1);
       CREATE TABLE IF NOT EXISTS reminders (kind TEXT NOT NULL, item_id INTEGER NOT NULL, due_on TEXT NOT NULL, reminder_on TEXT NOT NULL, PRIMARY KEY(kind,item_id,due_on,reminder_on));
       CREATE TABLE IF NOT EXISTS invites (code TEXT PRIMARY KEY, expires_at INTEGER NOT NULL, claimed_by TEXT);
+      CREATE TABLE IF NOT EXISTS announcements (update_id INTEGER PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS outbox (id INTEGER PRIMARY KEY, payload TEXT NOT NULL);
     `);
     for (const name of CATEGORIES) this.sql.exec("INSERT OR IGNORE INTO categories(name) VALUES(?)", name);
@@ -103,6 +104,22 @@ export class Account extends DurableObject {
     return true;
   }
   invitedUsers() { return rows(this.sql, "SELECT DISTINCT claimed_by FROM invites WHERE claimed_by IS NOT NULL AND expires_at<>0").map((r) => r.claimed_by); }
+  async announce(updateId, body) {
+    if (this.get("authorized") !== "1") return false;
+    if (row(this.sql, "SELECT 1 ok FROM announcements WHERE update_id=?", updateId)) return false;
+    this.sql.exec("INSERT INTO announcements(update_id) VALUES(?)", updateId);
+    await this.say(`SpendCue update:\n${body}`);
+    return true;
+  }
+  async announceToUsers(updateId, body) {
+    if (this.user() !== String(this.env.OWNER_TELEGRAM_USER_ID)) throw new Error("Owner only");
+    let count = Number(await this.announce(updateId, body));
+    for (const id of this.invitedUsers()) {
+      const account = this.env.ACCOUNTS.getByName(`user:${id}`);
+      count += Number(await account.announce(updateId, body));
+    }
+    return count;
+  }
 
   importData(data) {
     if (this.user() !== String(this.env.OWNER_TELEGRAM_USER_ID)) throw new Error("Owner only");
@@ -178,6 +195,9 @@ export class Account extends DurableObject {
       else if (step === "due_on") await this.say("Enter the next payment date as YYYY-MM-DD (today or later):", null, true);
       else if (step === "edit_field") await this.say("What would you like to change?", choices([["Name", "name"], ["Amount", "amount"], ["Schedule", "frequency"]], "field"));
       else if (step === "review") await this.say(`Review subscription · ${p.merchant} · ${this.fmt(p.amount, p.currency)} ${p.frequency} · next payment ${nextRenewal(p.first_due_on, p.frequency, this.today())}. Scheduled charges are added to spending automatically.`, choices([["Save", "save"], ["Edit", "edit"], ["Cancel", "cancel"]], "action"));
+    } else if (kind === "announcement") {
+      if (step === "body") await this.say("Write the update to send to everyone using this bot (up to 1,000 characters):", null, true);
+      else if (step === "review") await this.say(`Send this update to all active users?\n\n${p.body}`, choices([["Send update", "save"], ["Cancel", "cancel"]], "action"));
     } else if (kind === "overview_range") await this.say(`Enter the ${step} date as YYYY-MM-DD:`, null, true);
   }
 
@@ -297,7 +317,7 @@ export class Account extends DurableObject {
     const command = raw.startsWith("/") ? raw.split(/\s+/, 1)[0].split("@")[0] : raw;
     const routes = { "/start": "home", "/menu": "home", menu: "home", "/add": "add", add: "add", "/cards": "cards", "/cc": "cards", "/creditcard": "cards", "/subs": "subs", "/subscriptions": "subs", "/overview": "overview", "/manage": "manage", "/export": "export" };
     if (command === "/cancel" || command === "cancel") { this.clear(); await this.home(); return; }
-    if (command === "/help") { await this.say("Use /add, /cards, /subs, /overview, or /manage. /menu shows buttons; /cancel stops the current form. /export sends a CSV."); return; }
+    if (command === "/help") { await this.say(`Use /add, /cards, /subs, /overview, or /manage. /menu shows buttons; /cancel stops the current form. /export sends a CSV.${this.user() === String(this.env.OWNER_TELEGRAM_USER_ID) ? " Owner: /invite, /users, /announce." : ""}`); return; }
     if (this.user() === String(this.env.OWNER_TELEGRAM_USER_ID) && command === "/invite") {
       const code = this.createInvite();
       const bot = await telegram(this.env, "getMe", {});
@@ -305,6 +325,7 @@ export class Account extends DurableObject {
       return;
     }
     if (this.user() === String(this.env.OWNER_TELEGRAM_USER_ID) && command === "/users") { await this.users(); return; }
+    if (this.user() === String(this.env.OWNER_TELEGRAM_USER_ID) && command === "/announce") { await this.start("announcement", "body"); return; }
     if (routes[command]) { this.clear(); await this.navigate(routes[command]); return; }
     const session = this.session();
     if (!session) { await this.say("Choose a menu option or send /help.", [["Open menu", "nav:home"]]); return; }
@@ -351,6 +372,10 @@ export class Account extends DurableObject {
           if (selected < p.start) throw new Error("End date is before start date");
           this.clear(); await this.overview(p.start, selected);
         }
+      } else if (kind === "announcement" && step === "body") {
+        p.body = String(text || "").trim();
+        if (!p.body || p.body.length > 1000) throw new Error("Enter an update of 1 to 1,000 characters");
+        await this.step("review", p);
       } else await this.say("Use the buttons shown above, or /cancel to stop.");
     } catch (error) {
       if (!(error instanceof Error) || !/^(Enter|Use|Too many)/.test(error.message)) throw error;
@@ -491,7 +516,7 @@ export class Account extends DurableObject {
     }
   }
 
-  async saveSession(kind, p) {
+  async saveSession(kind, p, updateId) {
     try {
       let expenseId, label;
       if (kind === "expense") {
@@ -530,6 +555,9 @@ export class Account extends DurableObject {
         this.syncSubscriptions();
         this.sql.exec("UPDATE subscriptions SET merchant=?,amount=?,currency=?,frequency=?,first_due_on=?,auto_from=? WHERE id=?", p.merchant, p.amount, p.currency, p.frequency, p.first_due_on, p.auto_from, p.id);
         this.clear(); await this.subscriptions(); return;
+      } else if (kind === "announcement") {
+        const count = await this.announceToUsers(updateId, p.body);
+        this.clear(); await this.say(`Update queued for ${count} active user${count === 1 ? "" : "s"}.`); return;
       } else return;
       this.clear();
       await this.say(`${label} #${expenseId}: ${p.merchant} · ${this.fmt(p.amount, p.currency)} · ${p.category} · ${p.spent_on}`, [["Edit", `expense:edit:${expenseId}`], ["Undo", `expense:undo:${expenseId}`]]);

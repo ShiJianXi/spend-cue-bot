@@ -28,7 +28,13 @@ The Cloudflare version uses [Workers Free and SQLite-backed Durable Objects](htt
 6. Point Telegram at the Worker **after** migration. With the same environment variables and `WORKER_URL` set, run `python3 cloudflare/setup_webhook.py`. This registers the commands, sets the webhook secret, and discards old queued polling updates during the switch. Send `/start` to the bot and verify the menu.
 7. Send `/invite` in your private bot chat. Share the resulting one-use link privately with one friend. Generate a fresh link for each friend. Each link expires after seven days. `/users` lets you revoke access; revocation keeps that person's records stored but stops their use of the bot. Ask each friend to send `/start`, add a test expense, and check `/overview`.
 
-Only one deployment should receive updates for a bot token. Do not run the Python poller after setting the webhook. To change code later, run `npx wrangler deploy`; Durable Object data survives code deployments. To change a secret, use `npx wrangler secret put SECRET_NAME` or deploy with an updated secrets file. The `MIGRATION_SECRET` protects the one-time owner import endpoint; keep it private even after migration.
+Only one deployment should receive updates for a bot token. Do not run the Python poller after setting the webhook. To change a secret, use `npx wrangler secret put SECRET_NAME` or deploy with an updated secrets file. The `MIGRATION_SECRET` protects the one-time owner import endpoint; keep it private even after migration.
+
+### Shipping updates to users
+
+Run `npm test`, then `npx wrangler deploy --secrets-file .dev.vars` from this repository. Deploying the same Worker name updates the code behind the existing Telegram bot for **all users**; friends do not install anything or rejoin. Their individual Durable Object databases and saved records persist. Keep future database changes compatible with existing records and test them before deploying.
+
+For a visible release note, the owner sends `/announce` in the private bot chat, types a short message, reviews it, and taps **Send update**. The bot sends it once to the owner and each currently invited user; revoked users do not receive it. Announcements are deliberate, so routine deployments do not fill friends' chats with messages. Telegram send failures are retried from each user's outbox. The owner can also use `/users` to check who has access.
 
 The bot checks both the private chat ID and sender ID, and rejects group messages. It stores forms, expenses, cards, subscriptions, reminders, and update deduplication in each person's own database. Pending Telegram messages are kept in a per-user outbox and retried after temporary send failures. A send can still be duplicated if Telegram accepts it but its response is lost. The owner of the Cloudflare account can access the hosted data, and Telegram bot messages are [visible to the bot operator](https://telegram.org/privacy); tell friends this before inviting them.
 
@@ -110,7 +116,7 @@ python3 -m unittest discover -s tests -v  # local Python bot
 npm test                                   # Cloudflare Worker and privacy tests
 ```
 
-The tests mock Telegram and cover amount precision, month boundaries, menu flows, edits and undo, duplicate updates, invite claiming, per-user isolation, CSV isolation, card status, subscription recurrence, reminder deduplication, access control, and migration.
+The tests mock Telegram and cover amount precision, month boundaries, menu flows, edits and undo, duplicate updates, invite claiming, per-user isolation, CSV isolation, card status, subscription recurrence, reminder deduplication, announcements, access control, and migration.
 
 ## Backup and restore
 

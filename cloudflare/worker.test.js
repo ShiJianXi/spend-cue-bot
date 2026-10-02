@@ -75,6 +75,14 @@ test("invite, private database routing, duplicate updates, and reminders", async
   assert.match(last(1002).text, /invite-only/i);
   const second = await invite();
   await update(1002, `/start ${second}`);
+  await update(42, "/announce");
+  await update(42, "Card reminders are now available.");
+  const announceButton = last(42).reply_markup.inline_keyboard.flat().find((b) => b.text === "Send update");
+  const announcementId = await update(42, "", announceButton.callback_data);
+  for (const user of [42, 1001, 1002])
+    assert.equal(sent.filter((m) => String(m.chat_id) === String(user) && m.text.startsWith("SpendCue update:")).length, 1);
+  await update(42, "", announceButton.callback_data, announcementId);
+  assert.equal(sent.filter((m) => String(m.chat_id) === "1001" && m.text.startsWith("SpendCue update:")).length, 1);
   failNextSend = true;
   const beforeRetry = sent.length;
   await update(1002, "/help");
@@ -156,4 +164,9 @@ test("invite, private database routing, duplicate updates, and reminders", async
   await click(42, "Revoke access");
   await update(1001, `/start ${first}`);
   assert.match(last(1001).text, /invite-only/i);
+  await update(42, "/announce");
+  await update(42, "A second update.");
+  await click(42, "Send update");
+  assert.equal(sent.filter((m) => String(m.chat_id) === "1001" && m.text.startsWith("SpendCue update:")).length, 1);
+  assert.equal(sent.filter((m) => String(m.chat_id) === "1002" && m.text.startsWith("SpendCue update:")).length, 2);
 });
