@@ -1,0 +1,19 @@
+{
+  "name": "spendcue-cloudflare",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test cloudflare/*.test.js",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "miniflare": "4.20260730.0",
+    "wrangler": "4.147.0"
+  },
+  "overrides": {
+    "miniflare": {
+      "sharp": "^0.35.4",
+      "undici": "^7.29.1"
+    }
+  }
+}

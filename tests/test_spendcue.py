@@ -4,7 +4,7 @@ import unittest
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-from spendcue import SpendCue, amount_input, clean, money, next_renewal, open_db
+from spendcue import SpendCue, amount_input, clean, money, monthly_due, next_renewal, open_db
 
 
 class FakeTelegram:
@@ -58,25 +58,18 @@ class SpendCueTests(unittest.TestCase):
         self.callback(self.action("date:yesterday"))
         self.callback(self.action("action:save"))
 
-    def add_card_bill(self, amount="450", due="2026-10-05"):
+    def add_card(self, due_day="5"):
         self.message("/cards")
         self.callback("cards:add")
         self.message("Visa")
+        self.message(due_day)
         self.callback(self.action("action:save"))
-        self.callback("cards:bill")
+
+    def pay_card(self, amount):
+        self.callback("cards:pay")
         card_id = self.db.execute("SELECT id FROM cards WHERE name='Visa'").fetchone()[0]
         self.callback(self.action(f"card:{card_id}"))
         self.message(amount)
-        self.callback(self.action("date:custom"))
-        self.message(due)
-        self.callback(self.action("action:save"))
-
-    def pay_bill(self, amount):
-        self.callback("cards:pay")
-        bill_id = self.db.execute("SELECT id FROM bills").fetchone()[0]
-        self.callback(self.action(f"bill:{bill_id}"))
-        self.message(amount)
-        self.callback(self.action("date:today"))
         self.callback(self.action("action:save"))
 
     def add_subscription(self, name="Netflix", amount="18.99", frequency="monthly", due="2026-10-05"):
@@ -98,6 +91,7 @@ class SpendCueTests(unittest.TestCase):
         self.assertEqual(next_renewal(date(2026, 1, 31), "monthly", date(2026, 2, 1)), date(2026, 2, 28))
         self.assertEqual(next_renewal(date(2024, 2, 29), "yearly", date(2025, 1, 1)), date(2025, 2, 28))
         self.assertEqual(next_renewal(date(2026, 10, 31), "quarterly", date(2027, 1, 1)), date(2027, 1, 31))
+        self.assertEqual(monthly_due(31, date(2027, 2, 1)), date(2027, 2, 28))
         self.assertNotIn("1234", clean("Visa 1234.5678.9012.3456"))
 
     def test_expense_menu_edit_undo_and_replay(self):
@@ -126,43 +120,58 @@ class SpendCueTests(unittest.TestCase):
         self.assertEqual(self.bot.session()["step"], "category")
         self.assertIn("expired", self.telegram.sent[-1][0])
 
-    def test_card_partial_full_payment_and_new_month(self):
-        self.add_card_bill()
+    def test_card_one_payment_marks_month_paid_and_resets_next_month(self):
+        self.add_card()
+        self.callback("cards:alert:1:3")
         self.bot.reminders(); self.bot.reminders()
-        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM reminders WHERE kind='bill'").fetchone()[0], 1)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM reminders WHERE kind='card'").fetchone()[0], 1)
         self.callback("nav:cards")
         self.assertIn("Unpaid", self.telegram.sent[-1][0])
-        self.pay_bill("200")
+        self.pay_card("200")
         self.bot.overview()
-        self.assertIn("Card payments recorded (separate from spending): SGD 200.00", self.telegram.sent[-1][0])
+        self.assertIn("Card payments · 2026-10 (excluded from spending total to avoid double counting):", self.telegram.sent[-1][0])
+        self.assertIn("Visa: Paid · SGD 200.00 recorded · due 2026-10-05", self.telegram.sent[-1][0])
         self.assertNotIn("Total: SGD 200.00", self.telegram.sent[-1][0])
         self.callback("nav:cards")
-        self.assertIn("Part paid", self.telegram.sent[-1][0])
-        self.pay_bill("250")
-        self.callback("nav:cards")
         self.assertIn("Paid", self.telegram.sent[-1][0])
-        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM card_payments").fetchone()[0], 2)
+        self.callback("cards:pay")
+        self.assertIn("No unpaid cards", self.telegram.sent[-1][0])
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM card_payments").fetchone()[0], 1)
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM expenses").fetchone()[0], 0)
         self.bot.clock = lambda: datetime(2026, 11, 2, 2, tzinfo=ZoneInfo("UTC"))
         self.callback("nav:cards")
-        self.assertIn("No bill entered", self.telegram.sent[-1][0])
+        self.assertIn("Unpaid · due 2026-11-05", self.telegram.sent[-1][0])
         self.assertEqual(self.db.execute("SELECT paid_on FROM bills").fetchone()[0], "2026-10-02")
 
-    def test_bill_edit_preserves_recorded_payment(self):
-        self.add_card_bill()
-        self.pay_bill("200")
-        self.callback("cards:edit:1")
-        self.callback(self.action("field:amount"))
-        self.message("150")
+    def test_card_due_day_can_change_without_changing_payment_history(self):
+        self.callback("cards:add")
+        self.message("Visa")
+        self.message("0")
+        self.assertIn("day from 1 to 31", self.telegram.sent[-2][0])
+        self.message("5")
         self.callback(self.action("action:save"))
-        self.assertEqual(self.db.execute("SELECT amount FROM bills").fetchone()[0], 45000)
-        self.assertIn("must cover", self.telegram.sent[-1][0])
-        self.callback(self.action("action:edit"))
-        self.callback(self.action("field:amount"))
-        self.message("500")
+        self.pay_card("200")
+        self.callback("cards:due:1")
+        self.message("15")
         self.callback(self.action("action:save"))
-        self.assertEqual(self.db.execute("SELECT amount FROM bills").fetchone()[0], 50000)
-        self.assertEqual(self.bot.unpaid_bills()[0]["remaining"], 30000)
+        self.assertEqual(self.db.execute("SELECT due_day FROM cards").fetchone()[0], 15)
+        self.assertEqual(self.db.execute("SELECT amount FROM card_payments").fetchone()[0], 20000)
+        self.assertIn("Paid · due 2026-10-15", self.telegram.sent[-1][0])
+
+    def test_card_reminder_crosses_month_and_stops_after_payment(self):
+        self.bot.clock = lambda: datetime(2026, 9, 24, 2, tzinfo=ZoneInfo("UTC"))
+        self.add_card(due_day="1")
+        self.bot.reminders(); self.bot.reminders()
+        self.assertEqual(self.db.execute("SELECT due_on,reminder_on FROM reminders WHERE kind='card'").fetchone()[:],
+                         ("2026-10-01", "2026-09-24"))
+        self.assertIn("in 7 days", self.telegram.sent[-1][0])
+        self.bot.clock = lambda: datetime(2026, 10, 1, 2, tzinfo=ZoneInfo("UTC"))
+        self.bot.reminders(); self.bot.reminders()
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM reminders WHERE kind='card'").fetchone()[0], 2)
+        self.assertIn("(today)", self.telegram.sent[-1][0])
+        self.pay_card("123.45")
+        self.bot.reminders()
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM reminders WHERE kind='card'").fetchone()[0], 2)
 
     def test_subscription_schedule_cancel_and_reminder_deduplication(self):
         self.add_subscription()
@@ -203,15 +212,23 @@ class SpendCueTests(unittest.TestCase):
 
     def test_card_purchases_and_payments_have_separate_totals_and_overdue_status(self):
         self.add_expense(amount="10")
-        self.add_card_bill(amount="450", due="2026-10-01")
-        self.pay_bill("200")
+        self.add_subscription(due="2026-10-02")
+        self.add_card(due_day="1")
+        self.pay_card("200")
         self.bot.overview()
         summary = self.telegram.sent[-1][0]
-        self.assertIn("Total: SGD 10.00", summary)
-        self.assertIn("Card payments recorded (separate from spending): SGD 200.00", summary)
+        self.assertIn("Food: SGD 10.00", summary)
+        self.assertIn("Subscriptions: SGD 18.99", summary)
+        self.assertIn("Total: SGD 28.99", summary)
+        self.assertIn("Visa: Paid · SGD 200.00 recorded · due 2026-10-01", summary)
+        self.assertNotIn("Total: SGD 228.99", summary)
         self.bot.clock = lambda: datetime(2026, 11, 2, 2, tzinfo=ZoneInfo("UTC"))
         self.bot.cards()
-        self.assertIn("OVERDUE · Visa · SGD 250.00 remaining", self.telegram.sent[-1][0])
+        self.assertIn("Visa: Unpaid · overdue · due 2026-11-01", self.telegram.sent[-1][0])
+        self.bot.overview()
+        self.assertIn("Visa: Unpaid · due 2026-11-01", self.telegram.sent[-1][0])
+        self.bot.overview(date(2026, 10, 1), date(2026, 10, 31))
+        self.assertIn("Visa: Paid · SGD 200.00 recorded · due 2026-10-01", self.telegram.sent[-1][0])
 
     def test_recent_month_picker_and_older_history(self):
         with self.db:
@@ -219,6 +236,7 @@ class SpendCueTests(unittest.TestCase):
                                      (3000, "2026-09-30"), (4000, "2026-10-01"),
                                      (5000, "2024-01-15")):
                 self.db.execute("INSERT INTO expenses(amount,currency,merchant,category,spent_on) VALUES(?,'SGD','Test','Food',?)", (amount, spent_on))
+            self.db.execute("INSERT INTO cards(name,due_day,created_on) VALUES('Visa',30,'2026-09-01')")
             bill = self.db.execute("INSERT INTO bills(card_name,amount,currency,due_on,cycle_month) VALUES('Visa',5000,'SGD','2026-09-30','2026-09')")
             self.db.execute("INSERT INTO card_payments(bill_id,amount,currency,paid_on) VALUES(?,5000,'SGD','2026-09-30')", (bill.lastrowid,))
         self.callback("overview:months")
@@ -229,12 +247,13 @@ class SpendCueTests(unittest.TestCase):
         answer = self.telegram.sent[-1][0]
         self.assertIn("2026-09-01 to 2026-09-30", answer)
         self.assertIn("Total: SGD 50.00", answer)
-        self.assertIn("Card payments recorded (separate from spending): SGD 50.00", answer)
+        self.assertIn("Visa: Paid · SGD 50.00 recorded · due 2026-09-30", answer)
         self.assertNotIn("SGD 40.00", answer)
         self.callback("overview:range")
         self.message("2024-01-01")
         self.message("2024-01-31")
         self.assertIn("Total: SGD 50.00", self.telegram.sent[-1][0])
+        self.assertIn("No cards for this month.", self.telegram.sent[-1][0])
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM expenses WHERE deleted=0").fetchone()[0], 5)
 
     def test_categories_overview_currencies_and_private_only(self):
@@ -293,15 +312,19 @@ class SpendCueTests(unittest.TestCase):
                 INSERT INTO expenses(amount,currency,merchant,category,spent_on) VALUES(1000,'SGD','Cafe','groceries','2026-10-01');
                 INSERT INTO bills(card_name,amount,currency,due_on,paid_on) VALUES('Visa',45000,'SGD','2026-10-05','2026-10-02');
                 INSERT INTO subscriptions(merchant,amount,currency,day) VALUES('Old service',999,'SGD',31);
-                INSERT INTO transfers(bill_id,amount,currency,paid_on) VALUES(1,45000,'SGD','2026-10-02');
+                INSERT INTO transfers(bill_id,amount,currency,paid_on) VALUES(1,20000,'SGD','2026-10-02');
             """)
             old.close()
             db = open_db(path)
             self.assertEqual(db.execute("SELECT cycle_month FROM bills").fetchone()[0], "2026-10")
-            self.assertEqual(db.execute("SELECT amount FROM card_payments").fetchone()[0], 45000)
+            self.assertEqual(db.execute("SELECT amount FROM card_payments").fetchone()[0], 20000)
             self.assertTrue(db.execute("SELECT 1 FROM categories WHERE name='groceries'").fetchone())
             self.assertTrue(db.execute("SELECT 1 FROM cards WHERE name='Visa'").fetchone())
+            self.assertEqual(db.execute("SELECT due_day FROM cards WHERE name='Visa'").fetchone()[0], 5)
+            self.assertEqual(db.execute("SELECT created_on FROM cards WHERE name='Visa'").fetchone()[0], "2026-10-05")
             bot = SpendCue(db, self.telegram, 42, clock=self.bot.clock)
+            bot.cards()
+            self.assertIn("Visa: Paid · due 2026-10-05 · reminder 7 days before · SGD 200.00 recorded", self.telegram.sent[-1][0])
             bot.sync_subscriptions()
             self.assertEqual(db.execute("SELECT frequency,first_due_on,auto_from FROM subscriptions").fetchone()[:],
                              ("monthly", "2000-01-31", "2026-10-02"))

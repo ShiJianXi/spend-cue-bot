@@ -1,0 +1,17 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "spendcue",
+  "main": "cloudflare/worker.js",
+  "compatibility_date": "2026-07-30",
+  "durable_objects": {
+    "bindings": [{ "name": "ACCOUNTS", "class_name": "Account" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Account"] }],
+  "vars": {
+    "TIMEZONE": "Asia/Singapore",
+    "DEFAULT_CURRENCY": "SGD"
+  },
+  "secrets": {
+    "required": ["TELEGRAM_BOT_TOKEN", "TELEGRAM_WEBHOOK_SECRET", "OWNER_TELEGRAM_USER_ID", "MIGRATION_SECRET"]
+  }
+}

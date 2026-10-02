@@ -96,6 +96,10 @@ def next_renewal(first_due: date, frequency: str, today: date) -> date:
         period += 1
 
 
+def monthly_due(day: int, month: date) -> date:
+    return date(month.year, month.month, min(day, monthrange(month.year, month.month)[1]))
+
+
 def csv_safe(value: str) -> str:
     return "'" + value if value.lstrip().startswith(("=", "+", "-", "@")) else value
 
@@ -156,6 +160,16 @@ def open_db(path: str) -> sqlite3.Connection:
     """)
     if "cycle_month" not in {row[1] for row in db.execute("PRAGMA table_info(bills)")}:
         db.execute("ALTER TABLE bills ADD COLUMN cycle_month TEXT")
+    if "generated" not in {row[1] for row in db.execute("PRAGMA table_info(bills)")}:
+        db.execute("ALTER TABLE bills ADD COLUMN generated INTEGER NOT NULL DEFAULT 0")
+    card_columns = {row[1] for row in db.execute("PRAGMA table_info(cards)")}
+    migrating_cards = "due_day" not in card_columns
+    if migrating_cards:
+        db.execute("ALTER TABLE cards ADD COLUMN due_day INTEGER")
+    if "reminder_days" not in card_columns:
+        db.execute("ALTER TABLE cards ADD COLUMN reminder_days INTEGER NOT NULL DEFAULT 7")
+    if "created_on" not in card_columns:
+        db.execute("ALTER TABLE cards ADD COLUMN created_on TEXT")
     expense_columns = {row[1] for row in db.execute("PRAGMA table_info(expenses)")}
     if "subscription_id" not in expense_columns:
         db.execute("ALTER TABLE expenses ADD COLUMN subscription_id INTEGER")
@@ -176,7 +190,15 @@ def open_db(path: str) -> sqlite3.Connection:
             db.execute("INSERT OR IGNORE INTO categories(name) VALUES(?)", (name,))
         db.execute("INSERT OR IGNORE INTO categories(name) SELECT DISTINCT category FROM expenses WHERE category<>''")
         db.execute("INSERT OR IGNORE INTO cards(name) SELECT DISTINCT card_name FROM bills WHERE card_name<>''")
+        db.execute("""UPDATE cards SET created_on=(SELECT MIN(due_on) FROM bills
+                     WHERE card_name=cards.name COLLATE NOCASE)
+                     WHERE created_on IS NULL AND EXISTS(SELECT 1 FROM bills WHERE card_name=cards.name COLLATE NOCASE)""")
+        db.execute("""UPDATE cards SET due_day=(SELECT CAST(substr(due_on,9,2) AS INTEGER)
+                     FROM bills WHERE card_name=cards.name COLLATE NOCASE ORDER BY due_on DESC,id DESC LIMIT 1)
+                     WHERE due_day IS NULL AND EXISTS(SELECT 1 FROM bills WHERE card_name=cards.name COLLATE NOCASE)""")
         db.execute("INSERT OR IGNORE INTO card_payments(bill_id,amount,currency,paid_on,legacy_transfer_id) SELECT bill_id,amount,currency,paid_on,id FROM transfers")
+        if migrating_cards:
+            db.execute("DELETE FROM sessions WHERE kind IN ('card_add','bill','bill_edit','payment')")
     return db
 
 
@@ -189,6 +211,7 @@ class SpendCue:
         self.clock = clock or (lambda: datetime.now(self.zone))
         with self.db:
             self.db.execute("UPDATE subscriptions SET auto_from=? WHERE auto_from IS NULL", (self.today().isoformat(),))
+            self.db.execute("UPDATE cards SET created_on=? WHERE created_on IS NULL", (self.today().isoformat(),))
 
     def today(self) -> date:
         return self.clock().astimezone(self.zone).date()
@@ -248,31 +271,24 @@ class SpendCue:
                           self.choices(session, [(label, "save"), ("Edit", "edit"), ("Cancel", "cancel")], "action"))
         elif kind == "expense_undo":
             self.send("Delete this expense from spending totals?", self.choices(session, [("Undo expense", "save"), ("Cancel", "cancel")], "action"))
-        elif kind in ("card_add", "category_add", "category_rename"):
+        elif kind in ("card_add", "card_due", "category_add", "category_rename"):
             if step == "name":
                 self.send("Enter a card nickname (never a card number):" if kind == "card_add" else "Enter the category name:", prompt=True)
+            elif step == "due_day":
+                self.send("What day of each month is this card due? Enter 1–31:", prompt=True)
             elif step == "review":
-                self.send(f"Review · {p['name']}", self.choices(session, [("Save", "save"), ("Cancel", "cancel")], "action"))
-        elif kind in ("bill", "bill_edit"):
-            if step == "card":
-                rows = self.db.execute("SELECT id,name FROM cards WHERE active=1 ORDER BY name").fetchall()
-                self.send("Choose the card for this bill:", self.choices(session, [(r["name"], r["id"]) for r in rows], "card"))
-            elif step == "amount": self.send("Enter the statement amount:", prompt=True)
-            elif step == "date": self.send("Choose the exact payment due date:", self.choices(session, [("Today", "today"), ("Tomorrow", "tomorrow"), ("Enter date", "custom")], "date"))
-            elif step == "date_input": self.send("Enter the due date as YYYY-MM-DD:", prompt=True)
-            elif step == "edit_field": self.send("What would you like to change?", self.choices(session, [("Amount", "amount"), ("Due date", "date")], "field"))
-            elif step == "review":
-                self.send(f"Review bill · {p['card_name']} · {self.fmt(p['amount'], p['currency'])} due {p['due_on']}",
-                          self.choices(session, [("Save changes" if kind == "bill_edit" else "Save bill", "save"), ("Edit", "edit"), ("Cancel", "cancel")], "action"))
+                label = (f"{p['name']} · due day {p['due_day']} · remind 7 days before" if kind == "card_add"
+                         else f"{p['name']} · due day {p['due_day']}" if kind == "card_due" else p['name'])
+                self.send(f"Review · {label}", self.choices(session, [("Save", "save"), ("Cancel", "cancel")], "action"))
         elif kind == "payment":
-            if step == "bill":
-                rows = self.unpaid_bills()
-                self.send("Choose the bill you paid:", self.choices(session, [(f"{r['card_name']} · {r['due_on']} · {self.fmt(r['remaining'], r['currency'])} left", r["id"]) for r in rows[:10]], "bill"))
-            elif step == "amount": self.send(f"Enter the payment amount. Remaining: {self.fmt(p['remaining'], p['currency'])}", prompt=True)
-            elif step == "date": self.send("When did you pay it?", self.choices(session, [("Today", "today"), ("Yesterday", "yesterday"), ("Enter date", "custom")], "date"))
-            elif step == "date_input": self.send("Enter the payment date as YYYY-MM-DD:", prompt=True)
+            if step == "card":
+                month = self.today().strftime("%Y-%m")
+                rows = [r for r in self.db.execute("SELECT * FROM cards WHERE active=1 AND due_day IS NOT NULL ORDER BY name")
+                        if not self.card_paid(r["name"], month)]
+                self.send(f"Which card did you pay for {month}?", self.choices(session, [(r["name"], r["id"]) for r in rows], "card"))
+            elif step == "amount": self.send("How much did you pay? For example 450 or USD 450:", prompt=True)
             elif step == "review":
-                self.send(f"Review card payment · {p['card_name']} · {self.fmt(p['amount'], p['currency'])} on {p['paid_on']}. It will appear separately in the monthly overview.",
+                self.send(f"Review · {p['card_name']} · {self.fmt(p['amount'], p['currency'])} paid {p['paid_on']} for {p['cycle_month']}. This marks the month Paid.",
                           self.choices(session, [("Record payment", "save"), ("Cancel", "cancel")], "action"))
         elif kind in ("subscription", "subscription_edit"):
             if step == "name": self.send("Enter the subscription name:", prompt=True)
@@ -291,25 +307,29 @@ class SpendCue:
         rows = self.db.execute("SELECT * FROM cards WHERE active=1 ORDER BY name").fetchall()
         lines = [f"Credit cards · {month}"]
         for card in rows:
-            bill = self.db.execute("SELECT * FROM bills WHERE card_name=? COLLATE NOCASE AND cycle_month=? ORDER BY id DESC LIMIT 1", (card["name"], month)).fetchone()
-            if bill:
-                paid = self.paid_amount(bill["id"])
-                status = "Paid" if bill["paid_on"] or paid >= bill["amount"] else "Part paid" if paid else "Unpaid"
-                lines.append(f"{card['name']}: {status} · {self.fmt(bill['amount'], bill['currency'])} · due {bill['due_on']}" + (f" · {self.fmt(paid, bill['currency'])} paid" if paid else ""))
-            else:
-                lines.append(f"{card['name']}: No bill entered for this due month")
-        older = [r for r in self.unpaid_bills() if r["cycle_month"] < month]
-        for bill in older:
-            lines.append(f"OVERDUE · {bill['card_name']} · {self.fmt(bill['remaining'],bill['currency'])} remaining · due {bill['due_on']}")
+            payment = self.card_paid(card["name"], month)
+            if card["due_day"] is None:
+                lines.append(f"{card['name']}: {'Paid' if payment else 'Unpaid'} · set a due day")
+                continue
+            due = monthly_due(card["due_day"], self.today())
+            status = "Paid" if payment else "Unpaid · overdue" if due < self.today() else "Unpaid"
+            paid = f" · {self.fmt(payment['amount'],payment['currency'])} recorded" if payment else ""
+            reminder = f"{card['reminder_days']} days before" if card["reminder_days"] else "due day only"
+            lines.append(f"{card['name']}: {status} · due {due} · reminder {reminder}{paid}")
         if not rows: lines.append("No cards yet.")
-        self.send("\n".join(lines), [("Add card", "cards:add"), ("Add bill", "cards:bill"), ("Record payment", "cards:pay"), ("Edit bill", "cards:edit"), ("Back", "nav:home")])
+        buttons = [("Add card", "cards:add"), ("Record payment", "cards:pay")]
+        buttons += [(f"Settings · {r['name'][:20]}", f"cards:view:{r['id']}") for r in rows[:8]]
+        self.send("\n".join(lines), buttons + [("Back", "nav:home")])
 
-    def paid_amount(self, bill_id: int) -> int:
-        return self.db.execute("SELECT COALESCE(SUM(amount),0) FROM card_payments WHERE bill_id=?", (bill_id,)).fetchone()[0]
+    def card_paid(self, name: str, month: str):
+        return self.db.execute("""SELECT p.currency,SUM(p.amount) amount,MAX(p.paid_on) paid_on
+            FROM card_payments p JOIN bills b ON b.id=p.bill_id
+            WHERE b.card_name=? COLLATE NOCASE AND b.cycle_month=? GROUP BY p.currency""", (name, month)).fetchone()
 
-    def unpaid_bills(self):
-        rows = self.db.execute("SELECT * FROM bills WHERE paid_on IS NULL ORDER BY due_on,id").fetchall()
-        return [dict(row, remaining=row["amount"] - self.paid_amount(row["id"])) for row in rows if row["amount"] > self.paid_amount(row["id"])]
+    def unpaid_cards(self):
+        month = self.today().strftime("%Y-%m")
+        return [r for r in self.db.execute("SELECT * FROM cards WHERE active=1 ORDER BY name")
+                if not self.card_paid(r["name"], month)]
 
     def sync_subscriptions(self) -> None:
         """Record scheduled charges through today, including dates missed during downtime."""
@@ -370,9 +390,16 @@ class SpendCue:
         scheduled = self.db.execute("SELECT currency,SUM(amount) total FROM expenses WHERE deleted=0 AND subscription_id IS NOT NULL AND spent_on BETWEEN ? AND ? GROUP BY currency ORDER BY currency", (start.isoformat(), end.isoformat())).fetchall()
         if scheduled:
             lines.append("Scheduled subscriptions included above (payment not verified): " + ", ".join(self.fmt(r['total'], r['currency']) for r in scheduled))
-        payments = self.db.execute("SELECT currency,SUM(amount) total FROM card_payments WHERE paid_on BETWEEN ? AND ? GROUP BY currency ORDER BY currency", (start.isoformat(), end.isoformat())).fetchall()
-        lines.append("Card payments recorded (separate from spending): " + (", ".join(self.fmt(r['total'], r['currency']) for r in payments) if payments else "none"))
-        lines.append(f"Unpaid or part-paid card bills now: {len(self.unpaid_bills())}")
+        month = end.replace(day=1)
+        month_end = monthly_due(31, month)
+        cards = self.db.execute("SELECT * FROM cards WHERE active=1 AND created_on<=? ORDER BY name", (month_end.isoformat(),)).fetchall()
+        lines.append(f"Card payments · {month:%Y-%m} (excluded from spending total to avoid double counting):")
+        for card in cards:
+            payment = self.card_paid(card["name"], f"{month:%Y-%m}")
+            status = f"Paid · {self.fmt(payment['amount'], payment['currency'])} recorded" if payment else "Unpaid"
+            due = f" · due {monthly_due(card['due_day'], month)}" if card["due_day"] else ""
+            lines.append(f"{card['name']}: {status}{due}")
+        if not cards: lines.append("No cards for this month.")
         self.send("\n".join(lines), [("This week", "overview:week"), ("This month", "overview:month"), ("Recent months", "overview:months"), ("Date range", "overview:range"), ("Upcoming payments", "overview:upcoming"), ("Back", "nav:home")])
 
     def upcoming(self) -> None:
@@ -383,9 +410,13 @@ class SpendCue:
         for row in self.db.execute("SELECT * FROM subscriptions WHERE active=1"):
             due = next_renewal(date.fromisoformat(row["first_due_on"]), row["frequency"], today)
             if due <= end: items.append((due, f"{row['merchant']} · {self.fmt(row['amount'],row['currency'])} expected"))
-        for row in self.unpaid_bills():
-            due = date.fromisoformat(row["due_on"])
-            if due <= end: items.append((due, f"{row['card_name']} · {self.fmt(row['remaining'],row['currency'])} remaining"))
+        month = today.replace(day=1)
+        next_month = (month + timedelta(days=32)).replace(day=1)
+        for card in self.db.execute("SELECT * FROM cards WHERE active=1 AND due_day IS NOT NULL"):
+            for cycle in (month, next_month):
+                due = monthly_due(card["due_day"], cycle)
+                if due <= end and not self.card_paid(card["name"], cycle.strftime("%Y-%m")):
+                    items.append((due, f"{card['name']} · unpaid card payment"))
         items.sort()
         self.send("Upcoming payments:\n" + "\n".join(f"{d}: {label}" for d, label in items) if items else "No upcoming payments in the next 30 days.", [("Back", "nav:overview")])
 
@@ -397,7 +428,7 @@ class SpendCue:
             writer.writerow(("expense", r["id"], csv_safe(r["merchant"]), r["amount"], r["currency"], r["spent_on"], csv_safe(r["category"])))
         for r in self.db.execute("SELECT * FROM subscriptions ORDER BY id"):
             writer.writerow(("subscription_" + r["frequency"], r["id"], csv_safe(r["merchant"]), r["amount"], r["currency"], r["first_due_on"], "active" if r["active"] else "paused"))
-        for r in self.db.execute("SELECT * FROM bills ORDER BY id"):
+        for r in self.db.execute("SELECT * FROM bills WHERE generated=0 ORDER BY id"):
             writer.writerow(("card_bill", r["id"], csv_safe(r["card_name"]), r["amount"], r["currency"], r["due_on"], "paid" if r["paid_on"] else "unpaid"))
         for r in self.db.execute("SELECT p.*,b.card_name FROM card_payments p JOIN bills b ON b.id=p.bill_id ORDER BY p.id"):
             writer.writerow(("card_payment", r["id"], csv_safe(r["card_name"]), r["amount"], r["currency"], r["paid_on"], "transfer"))
@@ -435,21 +466,14 @@ class SpendCue:
             elif kind in ("card_add", "category_add", "category_rename") and step == "name":
                 p["name"] = clean(text, 40)
                 if not p["name"] or p["name"] == "[redacted card]": raise ValueError("Enter a short name, not a card number")
-                next_step = "review"
-            elif kind in ("bill", "bill_edit") and step in ("amount", "date_input"):
-                if step == "amount":
-                    p["amount"], p["currency"] = amount_input(text, p.get("currency", self.default_currency))
-                    next_step = "review" if "due_on" in p else "date"
-                else:
-                    p["due_on"] = resolve_date(text, self.today()).isoformat(); next_step = "review"
-            elif kind == "payment" and step in ("amount", "date_input"):
-                if step == "amount":
-                    amount, curr = amount_input(text, p["currency"])
-                    if curr != p["currency"]: raise ValueError("Payment currency must match the bill")
-                    if amount > p["remaining"]: raise ValueError("Payment exceeds the remaining bill")
-                    p["amount"] = amount; next_step = "date"
-                else:
-                    p["paid_on"] = resolve_date(text, self.today()).isoformat(); next_step = "review"
+                next_step = "due_day" if kind == "card_add" else "review"
+            elif kind in ("card_add", "card_due") and step == "due_day":
+                if not re.fullmatch(r"\d{1,2}", text.strip()) or not 1 <= int(text.strip()) <= 31:
+                    raise ValueError("Enter a day from 1 to 31")
+                p["due_day"] = int(text.strip()); next_step = "review"
+            elif kind == "payment" and step == "amount":
+                p["amount"], p["currency"] = amount_input(text, self.default_currency)
+                p["paid_on"] = self.today().isoformat(); next_step = "review"
             elif kind in ("subscription", "subscription_edit") and step in ("name", "amount", "due_on"):
                 if step == "name":
                     p["merchant"] = clean(text)
@@ -496,18 +520,29 @@ class SpendCue:
         if data.startswith("cards:"):
             action = data.split(":", 1)[1]
             if action == "add": self.start("card_add", "name")
-            elif action == "bill":
-                if self.db.execute("SELECT 1 FROM cards WHERE active=1").fetchone(): self.start("bill", "card")
-                else: self.send("Add a card nickname first.", [("Add card", "cards:add")])
             elif action == "pay":
-                if self.unpaid_bills(): self.start("payment", "bill")
-                else: self.send("No unpaid card bills found.")
-            elif action == "edit":
-                rows = self.db.execute("SELECT id,card_name,amount,currency,due_on FROM bills ORDER BY id DESC LIMIT 8").fetchall()
-                self.send("Choose a bill to edit:", [(f"{r['card_name']} · {r['due_on']} · {self.fmt(r['amount'],r['currency'])}", f"cards:edit:{r['id']}") for r in rows] + [("Back", "nav:cards")]) if rows else self.send("No bills to edit.")
-            elif action.startswith("edit:") and action[5:].isdigit():
-                row = self.db.execute("SELECT * FROM bills WHERE id=?", (int(action[5:]),)).fetchone()
-                if row: self.start("bill_edit", "edit_field", dict(row))
+                if any(r["due_day"] is not None for r in self.unpaid_cards()): self.start("payment", "card")
+                else: self.send("No unpaid cards with a due day this month.")
+            elif action.startswith("view:") and action[5:].isdigit():
+                card = self.db.execute("SELECT * FROM cards WHERE id=? AND active=1", (int(action[5:]),)).fetchone()
+                if card:
+                    reminder = f"{card['reminder_days']} days before" if card["reminder_days"] else "due day only"
+                    self.send(f"{card['name']} · due day {card['due_day'] or 'not set'} · remind {reminder}",
+                              [("Change due day", f"cards:due:{card['id']}"), ("Reminder timing", f"cards:alerts:{card['id']}"), ("Back", "nav:cards")])
+            elif action.startswith("due:") and action[4:].isdigit():
+                card = self.db.execute("SELECT * FROM cards WHERE id=? AND active=1", (int(action[4:]),)).fetchone()
+                if card: self.start("card_due", "due_day", {"id": card["id"], "name": card["name"]})
+            elif action.startswith("alerts:") and action[7:].isdigit():
+                card = self.db.execute("SELECT * FROM cards WHERE id=? AND active=1", (int(action[7:]),)).fetchone()
+                if card:
+                    self.send(f"Remind me before {card['name']} is due:",
+                              [("Due day only", f"cards:alert:{card['id']}:0"),
+                               ("1 day", f"cards:alert:{card['id']}:1"), ("3 days", f"cards:alert:{card['id']}:3"),
+                               ("1 week", f"cards:alert:{card['id']}:7"), ("2 weeks", f"cards:alert:{card['id']}:14")])
+            elif re.fullmatch(r"alert:\d+:(0|1|3|7|14)", action):
+                _, card_id, days = action.split(":")
+                self.db.execute("UPDATE cards SET reminder_days=? WHERE id=? AND active=1", (int(days), int(card_id)))
+                self.cards()
             return
         if data.startswith("subs:"):
             parts = data.split(":")
@@ -579,7 +614,7 @@ class SpendCue:
         if step == "review":
             if action == "action:save": self.save_session(session, p, update_id)
             elif action == "action:edit":
-                self.set_step("edit_field", p) if kind in ("expense", "expense_edit", "subscription", "subscription_edit", "bill", "bill_edit") else self.send("Use Cancel and start again to change this entry.")
+                self.set_step("edit_field", p) if kind in ("expense", "expense_edit", "subscription", "subscription_edit") else self.send("Use Cancel and start again to change this entry.")
             return
         if kind in ("expense", "expense_edit"):
             if step == "category" and action.startswith("cat:") and action[4:].isdigit():
@@ -599,28 +634,12 @@ class SpendCue:
         elif kind == "category_rename" and step == "choose" and action.startswith("category:") and action[9:].isdigit():
             row = self.db.execute("SELECT id,name FROM categories WHERE id=? AND active=1", (int(action[9:]),)).fetchone()
             if row: p["category_id"] = row["id"]; p["old_name"] = row["name"]; self.set_step("name", p)
-        elif kind in ("bill", "bill_edit"):
-            if step == "card" and action.startswith("card:") and action[5:].isdigit():
-                row = self.db.execute("SELECT name FROM cards WHERE id=? AND active=1", (int(action[5:]),)).fetchone()
-                if row: p["card_name"] = row["name"]; self.set_step("amount", p)
-            elif step == "date" and action.startswith("date:"):
-                choice = action[5:]
-                if choice == "custom": self.set_step("date_input", p)
-                elif choice in ("today", "tomorrow"):
-                    p["due_on"] = resolve_date(choice, self.today()).isoformat(); self.set_step("review", p)
-            elif step == "edit_field" and action in ("field:amount", "field:date"):
-                self.set_step(action[6:], p)
-        elif kind == "payment":
-            if step == "bill" and action.startswith("bill:") and action[5:].isdigit():
-                row = self.db.execute("SELECT * FROM bills WHERE id=? AND paid_on IS NULL", (int(action[5:]),)).fetchone()
-                if row:
-                    p.update({"bill_id": row["id"], "card_name": row["card_name"], "currency": row["currency"], "remaining": row["amount"] - self.paid_amount(row["id"])})
-                    self.set_step("amount", p)
-            elif step == "date" and action.startswith("date:"):
-                choice = action[5:]
-                if choice == "custom": self.set_step("date_input", p)
-                elif choice in ("today", "yesterday"):
-                    p["paid_on"] = resolve_date(choice, self.today()).isoformat(); self.set_step("review", p)
+        elif kind == "payment" and step == "card" and action.startswith("card:") and action[5:].isdigit():
+            row = self.db.execute("SELECT * FROM cards WHERE id=? AND active=1 AND due_day IS NOT NULL", (int(action[5:]),)).fetchone()
+            month = self.today().strftime("%Y-%m")
+            if row and not self.card_paid(row["name"], month):
+                p.update({"card_id": row["id"], "card_name": row["name"], "cycle_month": month})
+                self.set_step("amount", p)
         elif kind in ("subscription", "subscription_edit"):
             if step == "edit_field" and action.startswith("field:"):
                 field = action[6:]
@@ -647,7 +666,10 @@ class SpendCue:
                 self.db.execute("UPDATE expenses SET deleted=1 WHERE id=?", (p["expense_id"],))
                 self.clear(); self.send("Expense removed from spending totals."); return
             elif kind == "card_add":
-                self.db.execute("INSERT INTO cards(name) VALUES(?)", (p["name"],))
+                self.db.execute("INSERT INTO cards(name,due_day,created_on) VALUES(?,?,?)", (p["name"], p["due_day"], self.today().isoformat()))
+                self.clear(); self.cards(); return
+            elif kind == "card_due":
+                self.db.execute("UPDATE cards SET due_day=? WHERE id=? AND active=1", (p["due_day"], p["id"]))
                 self.clear(); self.cards(); return
             elif kind == "category_add":
                 self.db.execute("INSERT INTO categories(name) VALUES(?)", (p["name"],))
@@ -656,37 +678,23 @@ class SpendCue:
                 self.db.execute("UPDATE categories SET name=? WHERE id=?", (p["name"], p["category_id"]))
                 self.db.execute("UPDATE expenses SET category=? WHERE category=? COLLATE NOCASE", (p["name"], p["old_name"]))
                 self.clear(); self.categories(); return
-            elif kind == "bill":
-                cycle = p["due_on"][:7]
-                if self.db.execute("SELECT 1 FROM bills WHERE card_name=? COLLATE NOCASE AND cycle_month=?", (p["card_name"], cycle)).fetchone():
-                    self.send(f"A {p['card_name']} bill already exists for {cycle}. Cancel this form and start again if the due month is wrong."); return
-                self.db.execute("INSERT INTO bills(card_name,amount,currency,due_on,cycle_month,source_update) VALUES(?,?,?,?,?,?)",
-                                (p["card_name"], p["amount"], p["currency"], p["due_on"], cycle, update_id))
-                self.clear(); self.cards(); return
-            elif kind == "bill_edit":
-                bill = self.db.execute("SELECT * FROM bills WHERE id=?", (p["id"],)).fetchone()
-                if not bill: self.send("Bill not found."); return
-                paid = self.paid_amount(bill["id"])
-                if paid > p["amount"] or (paid and p["currency"] != bill["currency"]):
-                    self.send("The revised amount must cover recorded payments, and their currency cannot change."); return
-                cycle = p["due_on"][:7]
-                if self.db.execute("SELECT 1 FROM bills WHERE id<>? AND card_name=? COLLATE NOCASE AND cycle_month=?", (bill["id"], bill["card_name"], cycle)).fetchone():
-                    self.send("Another bill for this card already uses that due month."); return
-                paid_on = self.db.execute("SELECT MAX(paid_on) FROM card_payments WHERE bill_id=?", (bill["id"],)).fetchone()[0] if paid == p["amount"] else None
-                self.db.execute("UPDATE bills SET amount=?,currency=?,due_on=?,cycle_month=?,paid_on=? WHERE id=?",
-                                (p["amount"], p["currency"], p["due_on"], cycle, paid_on, bill["id"]))
-                self.clear(); self.cards(); return
             elif kind == "payment":
-                bill = self.db.execute("SELECT * FROM bills WHERE id=? AND paid_on IS NULL", (p["bill_id"],)).fetchone()
-                if not bill: self.send("This bill is already paid."); return
-                remaining = bill["amount"] - self.paid_amount(bill["id"])
-                if p["currency"] != bill["currency"] or not 0 < p["amount"] <= remaining:
-                    self.send("Payment no longer matches the outstanding bill. Start again from /cards."); return
+                card = self.db.execute("SELECT * FROM cards WHERE id=? AND active=1 AND due_day IS NOT NULL", (p["card_id"],)).fetchone()
+                if not card or self.card_paid(card["name"], p["cycle_month"]):
+                    self.clear(); self.send("This card is already paid for that month, or its due day is missing."); return
+                bill = self.db.execute("SELECT id FROM bills WHERE card_name=? COLLATE NOCASE AND cycle_month=? ORDER BY id DESC LIMIT 1",
+                                       (card["name"], p["cycle_month"])).fetchone()
+                if bill:
+                    bill_id = bill["id"]
+                    self.db.execute("UPDATE bills SET paid_on=? WHERE id=?", (p["paid_on"], bill_id))
+                else:
+                    month = date.fromisoformat(p["cycle_month"] + "-01")
+                    due = monthly_due(card["due_day"], month).isoformat()
+                    bill_id = self.db.execute("INSERT INTO bills(card_name,amount,currency,due_on,paid_on,cycle_month,source_update,generated) VALUES(?,?,?,?,?,?,?,1)",
+                                              (card["name"], p["amount"], p["currency"], due, p["paid_on"], p["cycle_month"], update_id)).lastrowid
                 self.db.execute("INSERT INTO card_payments(bill_id,amount,currency,paid_on,source_update) VALUES(?,?,?,?,?)",
-                                (bill["id"], p["amount"], p["currency"], p["paid_on"], update_id))
-                if p["amount"] == remaining:
-                    self.db.execute("UPDATE bills SET paid_on=? WHERE id=?", (p["paid_on"], bill["id"]))
-                self.clear(); self.send("Card payment recorded in the monthly overview. " + ("Bill paid." if p["amount"] == remaining else f"{self.fmt(remaining-p['amount'],p['currency'])} remains.")); return
+                                (bill_id, p["amount"], p["currency"], p["paid_on"], update_id))
+                self.clear(); self.send(f"{card['name']} marked Paid for {p['cycle_month']}: {self.fmt(p['amount'],p['currency'])} recorded. This payment is excluded from spending totals."); return
             elif kind == "subscription":
                 self.db.execute("INSERT INTO subscriptions(merchant,amount,currency,day,frequency,first_due_on,auto_from,source_update) VALUES(?,?,?,?,?,?,?,?)",
                                 (p["merchant"], p["amount"], p["currency"], p["day"], p["frequency"], p["first_due_on"], p["auto_from"], update_id))
@@ -732,10 +740,13 @@ class SpendCue:
                 due = today + timedelta(days=offset)
                 if next_renewal(date.fromisoformat(row["first_due_on"]), row["frequency"], due) == due:
                     self.remind("subscription", row["id"], due, today, f"{row['merchant']} renews for {self.fmt(row['amount'],row['currency'])}")
-        for row in self.unpaid_bills():
-            due = date.fromisoformat(row["due_on"])
-            if (due - today).days in (0, 3):
-                self.remind("bill", row["id"], due, today, f"{row['card_name']} bill: {self.fmt(row['remaining'],row['currency'])} remaining")
+        month = today.replace(day=1)
+        next_month = (month + timedelta(days=32)).replace(day=1)
+        for card in self.db.execute("SELECT * FROM cards WHERE active=1 AND due_day IS NOT NULL"):
+            for cycle in (month, next_month):
+                due = monthly_due(card["due_day"], cycle)
+                if (due - today).days in (0, card["reminder_days"]) and not self.card_paid(card["name"], cycle.strftime("%Y-%m")):
+                    self.remind("card", card["id"], due, today, f"{card['name']} card payment due")
 
     def remind(self, kind: str, item_id: int, due: date, today: date, label: str) -> None:
         key = (kind, item_id, due.isoformat(), today.isoformat())
@@ -743,7 +754,8 @@ class SpendCue:
             inserted = self.db.execute("INSERT OR IGNORE INTO reminders VALUES(?,?,?,?)", key).rowcount
         if not inserted: return
         try:
-            self.send(f"Reminder · {label} on {due}" + (" (today)" if due == today else " (in 3 days)"))
+            days = (due - today).days
+            self.send(f"Reminder · {label} on {due}" + (" (today)" if days == 0 else f" (in {days} day{'s' if days != 1 else ''})"))
         except Exception:
             with self.db: self.db.execute("DELETE FROM reminders WHERE kind=? AND item_id=? AND due_on=? AND reminder_on=?", key)
             raise
@@ -761,7 +773,7 @@ def main() -> None:
         bot.telegram.call("setMyCommands", {"commands": [
             {"command": "menu", "description": "Open SpendCue"},
             {"command": "add", "description": "Add spending"},
-            {"command": "cards", "description": "Credit card bills and payments"},
+            {"command": "cards", "description": "Credit cards and monthly payments"},
             {"command": "subs", "description": "Subscriptions"},
             {"command": "overview", "description": "Spending and upcoming payments"},
             {"command": "manage", "description": "Categories and edits"},

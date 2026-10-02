@@ -10,3 +10,8 @@ backups/
 __pycache__/
 .pytest_cache/
 .venv/
+node_modules/
+.wrangler/
+.mf/
+.dev.vars*
+!.dev.vars.example
