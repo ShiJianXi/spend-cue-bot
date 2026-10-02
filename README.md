@@ -34,17 +34,17 @@ Only one deployment should receive updates for a bot token. Do not run the Pytho
 
 Run `npm test`, then `npx wrangler deploy --secrets-file .dev.vars` from this repository. Deploying the same Worker name updates the code behind the existing Telegram bot for **all users**; friends do not install anything or rejoin. Their individual Durable Object databases and saved records persist. Keep future database changes compatible with existing records and test them before deploying.
 
-For a visible release note, the owner sends `/announce` in the private bot chat, types a short message, reviews it, and taps **Send update**. The bot sends it once to the owner and each currently invited user; revoked users do not receive it. Announcements are deliberate, so routine deployments do not fill friends' chats with messages. Telegram send failures are retried from each user's outbox. The owner can also use `/users` to check who has access.
+For a visible release note, the owner sends `/announce` in the private bot chat, types a short message, reviews it, and taps **Send update**. Each recipient sees a new message in their own bot chat reading `SpendCue update:` followed by the message body. Only the owner sees the draft, confirmation buttons, and recipient count. The bot sends it once to the owner and each friend who has claimed an invite and still has access; revoked users do not receive it. Telegram send failures are retried from each user's outbox. The owner can use `/users` to check who has joined.
 
 #### GitHub Actions deployment
 
-The [deploy workflow](.github/workflows/deploy.yml) runs on every push to `main` and can also be started from GitHub's **Actions** tab. It installs locked dependencies, runs the Cloudflare and Python tests, then deploys the same `spendcue` Worker if all tests pass. Deployments use the secrets already stored on that Worker; do **not** copy `.dev.vars` or the Telegram bot token into GitHub.
+The [deploy workflow](.github/workflows/deploy.yml) runs tests on every push to `main`. It deploys **only when you trigger it manually** from GitHub's **Actions** tab and select `main`: first it installs locked dependencies and runs the Cloudflare and Python tests, then it deploys the same `spendcue` Worker if all tests pass. Pushing code alone does not change the live bot. Deployments use the secrets already stored on that Worker; do **not** copy `.dev.vars` or the Telegram bot token into GitHub.
 
 One-time CI setup:
 
 1. In Cloudflare, create an **account API token** using the **Edit Cloudflare Workers** policy, scoped to the account that hosts SpendCue. Cloudflare's [GitHub Actions guide](https://developers.cloudflare.com/workers/ci-cd/external-cicd/github-actions/) describes this token and its permissions.
 2. In this GitHub repository, open **Settings → Secrets and variables → Actions → New repository secret**. Add `CLOUDFLARE_API_TOKEN` with that token. Add `CLOUDFLARE_ACCOUNT_ID` with the account ID shown by `npx wrangler whoami` or in the Cloudflare dashboard. Never commit either value.
-3. Open **Actions → Test and deploy SpendCue → Run workflow** and check that the test and deploy steps pass. After that, pushes to `main` deploy automatically. If credentials are missing, the deploy step fails without changing the live bot.
+3. When you want to release an update, open **Actions → Test and deploy SpendCue → Run workflow**, select `main`, and check that the test and deploy steps pass. If credentials are missing, the deploy step fails without changing the live bot.
 
 Only the owner can start `/announce`, `/invite`, or `/users`. The Worker checks Telegram's webhook secret, requires a private chat where the sender ID matches the chat ID, then compares that numeric sender ID with the deployed `OWNER_TELEGRAM_USER_ID` secret. This ID was copied from the local bot's `ALLOWED_TELEGRAM_USER_ID` when the hosted bot was first configured. Use the same Telegram account to send `/announce`; type the message when prompted, review it, and tap **Send update**. Friends cannot open that form or send announcements.
 
