@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+*.db
+*.db-*
+*.sqlite*
+*.bak
+*.backup
+backups/
+__pycache__/
+.pytest_cache/
+.venv/
