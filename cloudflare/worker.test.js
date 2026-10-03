@@ -123,6 +123,29 @@ test("invite, private database routing, duplicate updates, and reminders", async
   await update(1001, "/overview");
   assert.match(last(1001).text, /Total: SGD 10.25/);
   assert.match(last(1001).text, /📊 Spending/);
+  await update(1001, "/manage"); await click(1001, "Categories"); await click(1001, "Delete category");
+  await click(1001, "Food");
+  assert.match(last(1001).text, /Past spending in Food stays/);
+  await click(1001, "Cancel");
+  await update(1001, "/manage"); await click(1001, "Categories");
+  assert.match(last(1001).text, /Food/);
+  await click(1001, "Delete category"); await click(1001, "Food"); await click(1001, "Delete category");
+  await update(1001, "/add");
+  assert.ok(!last(1001).reply_markup.inline_keyboard.flat().some((b) => b.text.endsWith(" Food")));
+  await update(1001, "/overview");
+  assert.match(last(1001).text, /Food: SGD 10\.25/);
+  await update(1002, "/add");
+  assert.ok(last(1002).reply_markup.inline_keyboard.flat().some((b) => b.text.endsWith(" Food")));
+  await update(1002, "/manage"); await click(1002, "Categories");
+  for (const name of ["Transport", "Shopping", "Bills", "Other"]) {
+    await click(1002, "Delete category"); await click(1002, name); await click(1002, "Delete category");
+  }
+  await click(1002, "Delete category");
+  assert.match(last(1002).text, /Keep at least one category/);
+  await update(1001, "/manage"); await click(1001, "Categories"); await click(1001, "Add category");
+  await update(1001, "Food"); await click(1001, "Save");
+  await update(1001, "/add");
+  assert.ok(last(1001).reply_markup.inline_keyboard.flat().some((b) => b.text.endsWith(" Food")));
   await update(1002, "/overview");
   assert.match(last(1002).text, /No spending recorded/);
   assert.doesNotMatch(last(1002).text, /Lunch/);

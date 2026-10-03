@@ -208,6 +208,9 @@ export class Account extends DurableObject {
     } else if (kind === "announcement") {
       if (step === "body") await this.say("Write the update to send to everyone using this bot (up to 1,000 characters):", null, true);
       else if (step === "review") await this.say(`Send this update to all active users?\n\n${p.body}`, choices([["Send update", "save"], ["Cancel", "cancel"]], "action"));
+    } else if (kind === "category_delete") {
+      if (step === "choose") await this.say("🗑️ Which category should disappear from future spending choices?", [...choices(rows(this.sql, "SELECT id,name FROM categories WHERE active=1 ORDER BY id").map((r) => [r.name, r.id]), "category"), ...choices([["Cancel", "cancel"]], "action")]);
+      else if (step === "review") await this.say(`Delete ${p.name} from future choices?\n\nPast spending in ${p.name} stays in your history and totals. You can add the name again later.`, choices([["Delete category", "save"], ["Cancel", "cancel"]], "action"));
     } else if (kind === "overview_range") await this.say(`Enter the ${step} date as YYYY-MM-DD:`, null, true);
   }
 
@@ -262,7 +265,7 @@ export class Account extends DurableObject {
   async manage() { await this.say("⚙️ Manage\nFine-tune your records or take a copy of your data.", [["🏷️ Categories", "manage:categories"], ["✏️ Edit spending", "manage:expenses"], ["📤 Export CSV", "nav:export"], ["🏠 Menu", "nav:home"]]); }
   async categories() {
     const list = rows(this.sql, "SELECT name FROM categories WHERE active=1 ORDER BY id").map((r) => r.name).join(", ");
-    await this.say(`🏷️ Categories\n${list}`, [["➕ Add category", "category:add"], ["✏️ Rename category", "category:rename"], ["↩️ Back", "nav:manage"]]);
+    await this.say(`🏷️ Categories\n${list}`, [["➕ Add category", "category:add"], ["✏️ Rename category", "category:rename"], ["🗑️ Delete category", "category:delete"], ["↩️ Back", "nav:manage"]]);
   }
   async expensesToEdit() {
     const list = rows(this.sql, "SELECT * FROM expenses WHERE deleted=0 ORDER BY id DESC LIMIT 8");
@@ -495,6 +498,11 @@ export class Account extends DurableObject {
       await this.say("Choose a category to rename:", this.choices(session, rows(this.sql, "SELECT id,name FROM categories WHERE active=1 ORDER BY id").map((r) => [r.name, r.id]), "category"));
       return;
     }
+    if (data === "category:delete") {
+      if (row(this.sql, "SELECT COUNT(*) count FROM categories WHERE active=1").count <= 1) await this.say("Keep at least one category for new spending.", [["↩️ Back", "manage:categories"]]);
+      else await this.start("category_delete", "choose");
+      return;
+    }
     if (data.startsWith("expense:")) {
       const match = /^expense:(edit|undo):(\d+)$/.exec(data);
       if (!match) return;
@@ -552,6 +560,9 @@ export class Account extends DurableObject {
     } else if (kind === "category_rename" && step === "choose" && /^category:\d+$/.test(action)) {
       const category = row(this.sql, "SELECT * FROM categories WHERE id=? AND active=1", Number(action.slice(9)));
       if (category) { p.category_id = category.id; p.old_name = category.name; await this.step("name", p); }
+    } else if (kind === "category_delete" && step === "choose" && /^category:\d+$/.test(action)) {
+      const category = row(this.sql, "SELECT id,name FROM categories WHERE id=? AND active=1", Number(action.slice(9)));
+      if (category) await this.step("review", { category_id: category.id, name: category.name });
     } else if (kind === "payment" && step === "card" && /^card:\d+$/.test(action)) {
       const card = row(this.sql, "SELECT * FROM cards WHERE id=? AND active=1", Number(action.slice(5)));
       const month = this.today().slice(0, 7);
@@ -584,11 +595,20 @@ export class Account extends DurableObject {
         this.sql.exec("UPDATE cards SET due_day=? WHERE id=? AND active=1", p.due_day, p.id);
         this.clear(); await this.cards(); return;
       } else if (kind === "category_add") {
-        this.sql.exec("INSERT INTO categories(name) VALUES(?)", p.name);
+        const inactive = row(this.sql, "SELECT id FROM categories WHERE name=? COLLATE NOCASE AND active=0", p.name);
+        if (inactive) this.sql.exec("UPDATE categories SET active=1 WHERE id=?", inactive.id);
+        else this.sql.exec("INSERT INTO categories(name) VALUES(?)", p.name);
         this.clear(); await this.categories(); return;
       } else if (kind === "category_rename") {
         this.sql.exec("UPDATE categories SET name=? WHERE id=?", p.name, p.category_id);
         this.sql.exec("UPDATE expenses SET category=? WHERE category=? COLLATE NOCASE", p.name, p.old_name);
+        this.clear(); await this.categories(); return;
+      } else if (kind === "category_delete") {
+        const category = row(this.sql, "SELECT id FROM categories WHERE id=? AND active=1", p.category_id);
+        if (!category || row(this.sql, "SELECT COUNT(*) count FROM categories WHERE active=1").count <= 1) {
+          this.clear(); await this.say("Keep at least one category for new spending.", [["↩️ Back", "manage:categories"]]); return;
+        }
+        this.sql.exec("UPDATE categories SET active=0 WHERE id=?", category.id);
         this.clear(); await this.categories(); return;
       } else if (kind === "payment") {
         const card = row(this.sql, "SELECT * FROM cards WHERE id=? AND active=1", p.card_id);

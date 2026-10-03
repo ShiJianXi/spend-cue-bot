@@ -83,7 +83,7 @@ Send `/menu` or `/start` to open the five main options. On the hosted Cloudflare
 
 ### Spending: `/add`
 
-Choose a category, enter an amount such as `24.80` or `USD 24.80`, enter a merchant or short note, and choose Today, Yesterday, or a date you type as `YYYY-MM-DD`. Review the entry and tap **Save**. The confirmation has **Edit** and **Undo** buttons. Manage → Edit spending lists recent entries. New databases start with Food, Transport, Shopping, Bills, and Other; Manage → Categories adds or renames categories.
+Choose a category, enter an amount such as `24.80` or `USD 24.80`, enter a merchant or short note, and choose Today, Yesterday, or a date you type as `YYYY-MM-DD`. Review the entry and tap **Save**. The confirmation has **Edit** and **Undo** buttons. Manage → Edit spending lists recent entries. New databases start with Food, Transport, Shopping, Bills, and Other. Manage → Categories lets you add, rename, or delete a category. Deleting requires confirmation and removes it from future spending choices; past expenses and totals keep their original category. Keep at least one category active. Add a deleted name again to restore it.
 
 ### Credit cards: `/cards` (or `/cc`)
 
@@ -107,7 +107,7 @@ Totals include only manually entered `/add` expenses and scheduled subscription 
 
 ### Manage: `/manage`
 
-Add or rename categories, edit recent spending entries (including scheduled subscription charges), or download a CSV. Renaming a category updates saved expenses in that category. The CSV includes expenses, subscription schedules and charges, recorded card payments, and any older statement records. Text that could be interpreted as a spreadsheet formula is escaped on export.
+Add, rename, or delete categories; edit recent spending entries (including scheduled subscription charges); or download a CSV. Renaming a category updates saved expenses in that category. Deleting hides it from new spending without changing past expenses. The CSV includes expenses, subscription schedules and charges, recorded card payments, and any older statement records. Text that could be interpreted as a spreadsheet formula is escaped on export.
 
 Each person has one active form at a time and saves it in SQLite, so a restart does not lose the form. Old buttons from a cancelled form cannot change a newer form. Money uses integer minor units, and amounts and dates are validated before saving. Replayed Telegram update IDs cannot create duplicate records. Labels containing a full card number are redacted.
 

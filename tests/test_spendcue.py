@@ -316,6 +316,32 @@ class SpendCueTests(unittest.TestCase):
         self.message("/add", chat_type="group")
         self.assertEqual(len(self.telegram.sent), before)
 
+    def test_category_delete_preserves_history_and_can_be_restored(self):
+        self.add_expense()
+        food = self.db.execute("SELECT id FROM categories WHERE name='Food'").fetchone()[0]
+        self.callback("category:delete")
+        self.callback(self.action(f"category:{food}"))
+        self.assertIn("Past spending stays", self.telegram.sent[-1][0])
+        self.callback(self.action("action:cancel"))
+        self.assertEqual(self.db.execute("SELECT active FROM categories WHERE id=?", (food,)).fetchone()[0], 1)
+        self.callback("category:delete")
+        self.callback(self.action(f"category:{food}"))
+        self.callback(self.action("action:save"))
+        self.assertEqual(self.db.execute("SELECT active FROM categories WHERE id=?", (food,)).fetchone()[0], 0)
+        self.message("/add")
+        self.assertNotIn("Food", [label for label, _ in self.telegram.sent[-1][1]])
+        self.message("/overview")
+        self.assertIn("Food: SGD 24.80", self.telegram.sent[-1][0])
+        self.callback("category:add")
+        self.message("food")
+        self.callback(self.action("action:save"))
+        self.assertEqual(self.db.execute("SELECT active FROM categories WHERE id=?", (food,)).fetchone()[0], 1)
+        with self.db:
+            self.db.execute("UPDATE categories SET active=0 WHERE id<>?", (food,))
+        self.callback("category:delete")
+        self.assertIn("Keep at least one category", self.telegram.sent[-1][0])
+        self.assertEqual(self.db.execute("SELECT active FROM categories WHERE id=?", (food,)).fetchone()[0], 1)
+
     def test_photo_is_ignored_without_ai(self):
         self.message("", photo=[{"file_id": "receipt"}])
         self.assertIn("extraction is off", self.telegram.sent[-1][0])

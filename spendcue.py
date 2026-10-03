@@ -327,6 +327,14 @@ class SpendCue:
             elif step == "review":
                 self.send(f"Review subscription · {p['merchant']} · {self.fmt(p['amount'], p['currency'])} {p['frequency']} · next payment {next_renewal(date.fromisoformat(p['first_due_on']), p['frequency'], self.today())}. Scheduled charges are added to spending automatically.",
                           self.choices(session, [("Save", "save"), ("Edit", "edit"), ("Cancel", "cancel")], "action"))
+        elif kind == "category_delete":
+            if step == "choose":
+                rows = self.db.execute("SELECT id,name FROM categories WHERE active=1 ORDER BY id").fetchall()
+                self.send("Which category should disappear from future spending choices?",
+                          self.choices(session, [(r["name"], r["id"]) for r in rows], "category") + self.choices(session, [("Cancel", "cancel")], "action"))
+            elif step == "review":
+                self.send(f"Delete {p['name']} from future choices? Past spending stays in your history and totals. You can add the name again later.",
+                          self.choices(session, [("Delete category", "save"), ("Cancel", "cancel")], "action"))
         elif kind == "overview_range":
             self.send("Enter the " + ("start" if step == "start" else "end") + " date as YYYY-MM-DD:", prompt=True)
 
@@ -386,7 +394,7 @@ class SpendCue:
 
     def categories(self) -> None:
         rows = self.db.execute("SELECT id,name FROM categories WHERE active=1 ORDER BY id").fetchall()
-        self.send("Categories: " + ", ".join(r["name"] for r in rows), [("Add category", "category:add"), ("Rename category", "category:rename"), ("Back", "nav:manage")])
+        self.send("Categories: " + ", ".join(r["name"] for r in rows), [("Add category", "category:add"), ("Rename category", "category:rename"), ("Delete category", "category:delete"), ("Back", "nav:manage")])
 
     def expenses_to_edit(self) -> None:
         rows = self.db.execute("SELECT * FROM expenses WHERE deleted=0 ORDER BY id DESC LIMIT 8").fetchall()
@@ -622,6 +630,11 @@ class SpendCue:
             rows = self.db.execute("SELECT id,name FROM categories WHERE active=1 ORDER BY id").fetchall()
             self.send("Choose a category to rename:", self.choices(self.session(), [(r["name"], r["id"]) for r in rows], "category"))
             return
+        if data == "category:delete":
+            count = self.db.execute("SELECT COUNT(*) FROM categories WHERE active=1").fetchone()[0]
+            if count <= 1: self.send("Keep at least one category for new spending.", [("Back", "manage:categories")])
+            else: self.start("category_delete", "choose")
+            return
         if data.startswith("expense:"):
             parts = data.split(":")
             if len(parts) != 3 or not parts[2].isdigit(): return
@@ -683,6 +696,9 @@ class SpendCue:
         elif kind == "category_rename" and step == "choose" and action.startswith("category:") and action[9:].isdigit():
             row = self.db.execute("SELECT id,name FROM categories WHERE id=? AND active=1", (int(action[9:]),)).fetchone()
             if row: p["category_id"] = row["id"]; p["old_name"] = row["name"]; self.set_step("name", p)
+        elif kind == "category_delete" and step == "choose" and action.startswith("category:") and action[9:].isdigit():
+            row = self.db.execute("SELECT id,name FROM categories WHERE id=? AND active=1", (int(action[9:]),)).fetchone()
+            if row: self.set_step("review", {"category_id": row["id"], "name": row["name"]})
         elif kind == "payment" and step == "card" and action.startswith("card:") and action[5:].isdigit():
             row = self.db.execute("SELECT * FROM cards WHERE id=? AND active=1 AND due_day IS NOT NULL", (int(action[5:]),)).fetchone()
             month = self.today().strftime("%Y-%m")
@@ -721,11 +737,20 @@ class SpendCue:
                 self.db.execute("UPDATE cards SET due_day=? WHERE id=? AND active=1", (p["due_day"], p["id"]))
                 self.clear(); self.cards(); return
             elif kind == "category_add":
-                self.db.execute("INSERT INTO categories(name) VALUES(?)", (p["name"],))
+                inactive = self.db.execute("SELECT id FROM categories WHERE name=? COLLATE NOCASE AND active=0", (p["name"],)).fetchone()
+                if inactive: self.db.execute("UPDATE categories SET active=1 WHERE id=?", (inactive["id"],))
+                else: self.db.execute("INSERT INTO categories(name) VALUES(?)", (p["name"],))
                 self.clear(); self.categories(); return
             elif kind == "category_rename":
                 self.db.execute("UPDATE categories SET name=? WHERE id=?", (p["name"], p["category_id"]))
                 self.db.execute("UPDATE expenses SET category=? WHERE category=? COLLATE NOCASE", (p["name"], p["old_name"]))
+                self.clear(); self.categories(); return
+            elif kind == "category_delete":
+                category = self.db.execute("SELECT id FROM categories WHERE id=? AND active=1", (p["category_id"],)).fetchone()
+                count = self.db.execute("SELECT COUNT(*) FROM categories WHERE active=1").fetchone()[0]
+                if not category or count <= 1:
+                    self.clear(); self.send("Keep at least one category for new spending.", [("Back", "manage:categories")]); return
+                self.db.execute("UPDATE categories SET active=0 WHERE id=?", (category["id"],))
                 self.clear(); self.categories(); return
             elif kind == "payment":
                 card = self.db.execute("SELECT * FROM cards WHERE id=? AND active=1 AND due_day IS NOT NULL", (p["card_id"],)).fetchone()
