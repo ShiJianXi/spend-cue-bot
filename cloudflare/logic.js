@@ -66,4 +66,22 @@ export function nextRenewal(first, frequency, onOrAfter) {
     count++;
   }
 }
+export function subscriptionAnchor(value, frequency, today) {
+  // Leap-year anchor preserves the chosen day after a shortened renewal month.
+  value = value.trim();
+  let first;
+  if (frequency === "monthly") {
+    if (!/^\d{1,2}$/.test(value) || Number(value) < 1 || Number(value) > 31) throw new Error("Enter a day from 1 to 31");
+    first = `2000-01-${value.padStart(2, "0")}`;
+  } else if (frequency === "quarterly") {
+    const match = /^(\d{1,2})-(\d{1,2})$/.exec(value);
+    if (!match) throw new Error("Enter a month and day as MM-DD");
+    try { first = parseDate(`2000-${match[1].padStart(2, "0")}-${match[2].padStart(2, "0")}`); }
+    catch { throw new Error("Enter a valid month and day as MM-DD"); }
+  } else if (frequency === "yearly") {
+    first = parseDate(value);
+    if (first < today) throw new Error("Enter today or a future payment date");
+  } else throw new Error("Choose monthly, quarterly, or yearly");
+  return first;
+}
 export const csvSafe = (value) => /^[=+\-@]/.test(String(value).trimStart()) ? `'${value}` : value;

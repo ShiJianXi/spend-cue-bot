@@ -96,6 +96,30 @@ def next_renewal(first_due: date, frequency: str, today: date) -> date:
         period += 1
 
 
+def subscription_anchor(value: str, frequency: str, today: date) -> date:
+    # Leap-year anchor preserves the chosen day after a shortened renewal month.
+    value = value.strip()
+    if frequency == "monthly":
+        if not re.fullmatch(r"\d{1,2}", value) or not 1 <= int(value) <= 31:
+            raise ValueError("Enter a day from 1 to 31")
+        first = date(2000, 1, int(value))
+    elif frequency == "quarterly":
+        match = re.fullmatch(r"(\d{1,2})-(\d{1,2})", value)
+        if not match:
+            raise ValueError("Enter a month and day as MM-DD")
+        try:
+            first = date(2000, int(match[1]), int(match[2]))
+        except ValueError as exc:
+            raise ValueError("Enter a valid month and day as MM-DD") from exc
+    elif frequency == "yearly":
+        first = resolve_date(value, today)
+        if first < today:
+            raise ValueError("Enter today or a future payment date")
+    else:
+        raise ValueError("Choose monthly, quarterly, or yearly")
+    return first
+
+
 def monthly_due(day: int, month: date) -> date:
     return date(month.year, month.month, min(day, monthrange(month.year, month.month)[1]))
 
@@ -294,7 +318,11 @@ class SpendCue:
             if step == "name": self.send("Enter the subscription name:", prompt=True)
             elif step == "amount": self.send("Enter the amount per renewal:", prompt=True)
             elif step == "frequency": self.send("How often is it charged?", self.choices(session, [("Monthly", "monthly"), ("Quarterly", "quarterly"), ("Yearly", "yearly")], "frequency"))
-            elif step == "due_on": self.send("Enter the next payment date as YYYY-MM-DD (today or later):", prompt=True)
+            elif step == "due_on":
+                prompt = {"monthly": "Enter the payment day each month (1–31):",
+                          "quarterly": "Enter the payment month and day as MM-DD (for example 10-15):",
+                          "yearly": "Enter the next payment date as YYYY-MM-DD (today or later):"}[p["frequency"]]
+                self.send(prompt, prompt=True)
             elif step == "edit_field": self.send("What would you like to change?", self.choices(session, [("Name", "name"), ("Amount", "amount"), ("Schedule", "frequency")], "field"))
             elif step == "review":
                 self.send(f"Review subscription · {p['merchant']} · {self.fmt(p['amount'], p['currency'])} {p['frequency']} · next payment {next_renewal(date.fromisoformat(p['first_due_on']), p['frequency'], self.today())}. Scheduled charges are added to spending automatically.",
@@ -483,8 +511,7 @@ class SpendCue:
                     p["amount"], p["currency"] = amount_input(text, p.get("currency", self.default_currency))
                     next_step = "review" if "first_due_on" in p else "frequency"
                 else:
-                    due = resolve_date(text, self.today())
-                    if due < self.today(): raise ValueError("Enter today or a future payment date")
+                    due = subscription_anchor(text, p["frequency"], self.today())
                     p["first_due_on"] = due.isoformat(); p["day"] = due.day; p["auto_from"] = self.today().isoformat()
                     next_step = "review"
             elif kind == "overview_range" and step in ("start", "end"):

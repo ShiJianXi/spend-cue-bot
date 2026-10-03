@@ -4,7 +4,7 @@ import unittest
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-from spendcue import SpendCue, amount_input, clean, money, monthly_due, next_renewal, open_db
+from spendcue import SpendCue, amount_input, clean, money, monthly_due, next_renewal, open_db, subscription_anchor
 
 
 class FakeTelegram:
@@ -72,7 +72,7 @@ class SpendCueTests(unittest.TestCase):
         self.message(amount)
         self.callback(self.action("action:save"))
 
-    def add_subscription(self, name="Netflix", amount="18.99", frequency="monthly", due="2026-10-05"):
+    def add_subscription(self, name="Netflix", amount="18.99", frequency="monthly", due="5"):
         self.callback("subs:add")
         self.message(name)
         self.message(amount)
@@ -93,6 +93,22 @@ class SpendCueTests(unittest.TestCase):
         self.assertEqual(next_renewal(date(2026, 10, 31), "quarterly", date(2027, 1, 1)), date(2027, 1, 31))
         self.assertEqual(monthly_due(31, date(2027, 2, 1)), date(2027, 2, 28))
         self.assertNotIn("1234", clean("Visa 1234.5678.9012.3456"))
+
+    def test_subscription_day_and_month_day_inputs(self):
+        today = date(2026, 10, 2)
+        monthly = subscription_anchor("31", "monthly", today)
+        self.assertEqual(next_renewal(subscription_anchor("1", "monthly", today), "monthly", today), date(2026, 11, 1))
+        self.assertEqual(next_renewal(monthly, "monthly", date(2027, 2, 1)), date(2027, 2, 28))
+        self.assertEqual(next_renewal(monthly, "monthly", date(2027, 3, 1)), date(2027, 3, 31))
+        self.assertEqual(next_renewal(subscription_anchor("01-15", "quarterly", today), "quarterly", today), date(2026, 10, 15))
+        self.assertEqual(next_renewal(subscription_anchor("10-01", "quarterly", today), "quarterly", today), date(2027, 1, 1))
+        leap = subscription_anchor("02-29", "quarterly", today)
+        self.assertEqual(next_renewal(leap, "quarterly", date(2027, 2, 1)), date(2027, 2, 28))
+        self.assertEqual(next_renewal(leap, "quarterly", date(2027, 3, 1)), date(2027, 5, 29))
+        self.assertEqual(subscription_anchor("2026-10-15", "yearly", today), date(2026, 10, 15))
+        for value, frequency in (("32", "monthly"), ("2026-10-15", "monthly"), ("02-30", "quarterly"), ("2026-10-01", "yearly")):
+            with self.subTest(value=value, frequency=frequency), self.assertRaises(ValueError):
+                subscription_anchor(value, frequency, today)
 
     def test_expense_menu_edit_undo_and_replay(self):
         self.add_expense()
@@ -189,7 +205,7 @@ class SpendCueTests(unittest.TestCase):
         self.assertEqual(self.db.execute("SELECT active FROM subscriptions").fetchone()[0], 0)
 
     def test_scheduled_subscription_spending_catchup_cancel_and_undo(self):
-        self.add_subscription(frequency="quarterly", due="2026-10-02")
+        self.add_subscription(frequency="quarterly", due="10-02")
         self.bot.sync_subscriptions(); self.bot.sync_subscriptions()
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM expenses WHERE subscription_id=1").fetchone()[0], 1)
         self.bot.overview()
@@ -212,7 +228,7 @@ class SpendCueTests(unittest.TestCase):
 
     def test_card_purchases_and_payments_have_separate_totals_and_overdue_status(self):
         self.add_expense(amount="10")
-        self.add_subscription(due="2026-10-02")
+        self.add_subscription(due="2")
         self.add_card(due_day="1")
         self.pay_card("200")
         self.bot.overview()

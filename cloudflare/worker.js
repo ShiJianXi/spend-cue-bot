@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { CATEGORIES, addDays, amountInput, clean, csvSafe, currency, formatMoney, monthDue, nextRenewal, parseDate, todayIn } from "./logic.js";
+import { CATEGORIES, addDays, amountInput, clean, csvSafe, currency, formatMoney, monthDue, nextRenewal, parseDate, subscriptionAnchor, todayIn } from "./logic.js";
 
 const row = (sql, query, ...args) => sql.exec(query, ...args).toArray()[0];
 const rows = (sql, query, ...args) => sql.exec(query, ...args).toArray();
@@ -192,7 +192,7 @@ export class Account extends DurableObject {
       if (step === "name") await this.say("Enter the subscription name:", null, true);
       else if (step === "amount") await this.say("Enter the amount per renewal:", null, true);
       else if (step === "frequency") await this.say("How often is it charged?", choices([["Monthly", "monthly"], ["Quarterly", "quarterly"], ["Yearly", "yearly"]], "frequency"));
-      else if (step === "due_on") await this.say("Enter the next payment date as YYYY-MM-DD (today or later):", null, true);
+      else if (step === "due_on") await this.say({ monthly: "Enter the payment day each month (1–31):", quarterly: "Enter the payment month and day as MM-DD (for example 10-15):", yearly: "Enter the next payment date as YYYY-MM-DD (today or later):" }[p.frequency], null, true);
       else if (step === "edit_field") await this.say("What would you like to change?", choices([["Name", "name"], ["Amount", "amount"], ["Schedule", "frequency"]], "field"));
       else if (step === "review") await this.say(`Review subscription · ${p.merchant} · ${this.fmt(p.amount, p.currency)} ${p.frequency} · next payment ${nextRenewal(p.first_due_on, p.frequency, this.today())}. Scheduled charges are added to spending automatically.`, choices([["Save", "save"], ["Edit", "edit"], ["Cancel", "cancel"]], "action"));
     } else if (kind === "announcement") {
@@ -360,8 +360,7 @@ export class Account extends DurableObject {
           [p.amount, p.currency] = amountInput(text, p.currency || this.code());
           await this.step(p.first_due_on ? "review" : "frequency", p);
         } else {
-          const due = parseDate(text.trim());
-          if (due < this.today()) throw new Error("Enter today or a future payment date");
+          const due = subscriptionAnchor(text, p.frequency, this.today());
           p.first_due_on = due; p.auto_from = this.today();
           await this.step("review", p);
         }

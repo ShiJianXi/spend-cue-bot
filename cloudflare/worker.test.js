@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { Miniflare } from "miniflare";
-import { addDays, amountInput, clean, monthDue, nextRenewal, todayIn } from "./logic.js";
+import { addDays, amountInput, clean, monthDue, nextRenewal, subscriptionAnchor, todayIn } from "./logic.js";
 
 test("money and calendar boundaries use integer units", () => {
   assert.deepEqual(amountInput("USD 1,234.50"), [123450, "USD"]);
@@ -10,6 +10,18 @@ test("money and calendar boundaries use integer units", () => {
   assert.throws(() => amountInput("1.001 SGD"));
   assert.equal(monthDue(31, "2027-02"), "2027-02-28");
   assert.equal(nextRenewal("2024-02-29", "yearly", "2025-01-01"), "2025-02-28");
+  const monthly = subscriptionAnchor("31", "monthly", "2026-10-02");
+  assert.equal(nextRenewal(subscriptionAnchor("1", "monthly", "2026-10-02"), "monthly", "2026-10-02"), "2026-11-01");
+  assert.equal(nextRenewal(monthly, "monthly", "2027-02-01"), "2027-02-28");
+  assert.equal(nextRenewal(monthly, "monthly", "2027-03-01"), "2027-03-31");
+  assert.equal(nextRenewal(subscriptionAnchor("01-15", "quarterly", "2026-10-02"), "quarterly", "2026-10-02"), "2026-10-15");
+  assert.equal(nextRenewal(subscriptionAnchor("10-01", "quarterly", "2026-10-02"), "quarterly", "2026-10-02"), "2027-01-01");
+  const leap = subscriptionAnchor("02-29", "quarterly", "2026-10-02");
+  assert.equal(nextRenewal(leap, "quarterly", "2027-02-01"), "2027-02-28");
+  assert.equal(nextRenewal(leap, "quarterly", "2027-03-01"), "2027-05-29");
+  assert.equal(subscriptionAnchor("2026-10-15", "yearly", "2026-10-02"), "2026-10-15");
+  for (const [value, frequency] of [["32", "monthly"], ["2026-10-15", "monthly"], ["02-30", "quarterly"], ["2026-10-01", "yearly"]])
+    assert.throws(() => subscriptionAnchor(value, frequency, "2026-10-02"));
   assert.equal(todayIn("Asia/Singapore", new Date("2026-10-01T17:00:00Z")), "2026-10-02");
   assert.equal(clean("Visa 4111/1111/1111/1111"), "[redacted card]");
 });
@@ -135,10 +147,13 @@ test("invite, private database routing, duplicate updates, and reminders", async
   const due = addDays(todayIn("UTC"), 3);
   await update(1001, "/subs"); await click(1001, "Add subscription");
   await update(1001, "Netflix"); await update(1001, "18.99"); await click(1001, "Monthly");
-  await update(1001, due); await click(1001, "Save");
+  assert.match(last(1001).text, /payment day each month/);
+  await update(1001, String(Number(due.slice(-2))));
+  assert.match(last(1001).text, new RegExp(`next payment ${due}`));
+  await click(1001, "Save");
   await update(1001, "/subs"); await click(1001, "Add subscription");
   await update(1001, "Cloud storage"); await update(1001, "2.50"); await click(1001, "Monthly");
-  await update(1001, todayIn("UTC")); await click(1001, "Save");
+  await update(1001, String(Number(todayIn("UTC").slice(-2)))); await click(1001, "Save");
   await update(1001, "/overview");
   assert.match(last(1001).text, /Total: SGD 12\.75/);
   assert.match(last(1001).text, /Scheduled subscriptions included above/);
@@ -148,6 +163,14 @@ test("invite, private database routing, duplicate updates, and reminders", async
   await namespace.getByName("user:1001").reminders();
   assert.equal(sent.filter((m) => m.chat_id === "1001" && m.text.startsWith("Reminder · Netflix")).length, 1);
   assert.equal(sent.filter((m) => m.chat_id === "1002" && m.text.startsWith("Reminder")).length, 0);
+
+  const quarterlyDue = addDays(todayIn("UTC"), 10);
+  await update(1001, "/subs"); await click(1001, "Add subscription");
+  await update(1001, "Quarterly service"); await update(1001, "5"); await click(1001, "Quarterly");
+  assert.match(last(1001).text, /month and day as MM-DD/);
+  await update(1001, quarterlyDue.slice(5));
+  assert.match(last(1001).text, new RegExp(`next payment ${quarterlyDue}`));
+  await click(1001, "Save");
 
   const imported = { categories: [], subscriptions: [], cards: [], expenses: [{ id: 7, amount: 1234, currency: "SGD", merchant: "Owner only", category: "Food", spent_on: todayIn("UTC"), subscription_id: null, scheduled_due: null, deleted: 0 }], card_payments: [], reminders: [] };
   const importRequest = (secret) => mf.dispatchFetch("http://localhost/import", { method: "POST", headers: { "X-SpendCue-Import-Secret": secret }, body: JSON.stringify(imported) });
