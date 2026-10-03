@@ -70,7 +70,7 @@ test("invite, private database routing, duplicate updates, and reminders", async
   };
   const last = (user) => sent.filter((m) => m.chat_id === String(user) || m.chat_id === user).at(-1);
   const click = async (user, label) => {
-    const button = last(user).reply_markup.inline_keyboard.flat().find((b) => b.text === label);
+    const button = last(user).reply_markup.inline_keyboard.flat().find((b) => b.text === label || b.text.endsWith(` ${label}`));
     assert.ok(button, `Missing button ${label}`);
     await update(user, "", button.callback_data);
   };
@@ -83,6 +83,8 @@ test("invite, private database routing, duplicate updates, and reminders", async
   const first = await invite();
   await update(1001, `/start ${first}`);
   assert.match(last(1001).text, /choose what to do/i);
+  assert.match(last(1001).text, /Cards: 0 unpaid this month/);
+  assert.equal(last(1001).reply_markup.inline_keyboard[0].length, 2);
   await update(1002, `/start ${first}`);
   assert.match(last(1002).text, /invite-only/i);
   const second = await invite();
@@ -101,20 +103,26 @@ test("invite, private database routing, duplicate updates, and reminders", async
   assert.equal(sent.length, beforeRetry);
   const namespace = await mf.getDurableObjectNamespace("ACCOUNTS");
   await namespace.getByName("user:1002").flushOutbox();
-  assert.match(last(1002).text, /Use \/add/);
+  assert.match(last(1002).text, /\/add · log spending/);
 
   await update(1001, "/add");
+  assert.match(last(1001).text, /Add spending · 1\/4/);
+  assert.equal(last(1001).reply_markup.inline_keyboard[0].length, 2);
   await click(1001, "Food");
   await update(1001, "10.25");
   await update(1001, "Lunch");
   await click(1001, "Today");
   const savedId = await update(1001, "", last(1001).reply_markup.inline_keyboard.flat().find((b) => b.text === "Save expense").callback_data);
   assert.match(last(1001).text, /Saved expense #1: Lunch/);
+  assert.ok(last(1001).reply_markup.inline_keyboard.flat().some((b) => b.callback_data === "nav:add"));
+  await update(1001, "/menu");
+  assert.match(last(1001).text, /SGD 10\.25/);
   const count = sent.length;
   await update(1001, "", "s:1:action:save", savedId);
   assert.equal(sent.length, count);
   await update(1001, "/overview");
   assert.match(last(1001).text, /Total: SGD 10.25/);
+  assert.match(last(1001).text, /📊 Spending/);
   await update(1002, "/overview");
   assert.match(last(1002).text, /No spending recorded/);
   assert.doesNotMatch(last(1002).text, /Lunch/);
@@ -149,7 +157,7 @@ test("invite, private database routing, duplicate updates, and reminders", async
   await update(1001, "Netflix"); await update(1001, "18.99"); await click(1001, "Monthly");
   assert.match(last(1001).text, /payment day each month/);
   await update(1001, String(Number(due.slice(-2))));
-  assert.match(last(1001).text, new RegExp(`next payment ${due}`));
+  assert.match(last(1001).text, new RegExp(`Next payment ${due}`));
   await click(1001, "Save");
   await update(1001, "/subs"); await click(1001, "Add subscription");
   await update(1001, "Cloud storage"); await update(1001, "2.50"); await click(1001, "Monthly");
@@ -157,7 +165,7 @@ test("invite, private database routing, duplicate updates, and reminders", async
   await update(1001, "/overview");
   assert.match(last(1001).text, /Total: SGD 12\.75/);
   assert.match(last(1001).text, /Scheduled subscriptions included above/);
-  assert.match(last(1001).text, /Subscriptions \(scheduled payments are not verified\):\nCloud storage: Paid · SGD 2\.50/);
+  assert.match(last(1001).text, /Subscriptions \(scheduled payments are not verified\):\n✅ Cloud storage: Paid · SGD 2\.50/);
   await namespace.getByName("user:1001").overview(todayIn("UTC"), due);
   assert.match(last(1001).text, new RegExp(`Netflix: Unpaid · SGD 18\\.99 · due ${due}`));
   await update(1002, "/overview");
@@ -166,6 +174,7 @@ test("invite, private database routing, duplicate updates, and reminders", async
   await namespace.getByName("user:1001").reminders();
   await namespace.getByName("user:1001").reminders();
   assert.equal(sent.filter((m) => m.chat_id === "1001" && m.text.startsWith("Reminder · Netflix")).length, 1);
+  assert.equal(sent.find((m) => m.chat_id === "1001" && m.text.startsWith("Reminder · Netflix")).reply_markup.inline_keyboard[0][0].callback_data, "nav:subs");
   assert.equal(sent.filter((m) => m.chat_id === "1002" && m.text.startsWith("Reminder")).length, 0);
 
   const quarterlyDue = addDays(todayIn("UTC"), 10);
@@ -173,7 +182,7 @@ test("invite, private database routing, duplicate updates, and reminders", async
   await update(1001, "Quarterly service"); await update(1001, "5"); await click(1001, "Quarterly");
   assert.match(last(1001).text, /month and day as MM-DD/);
   await update(1001, quarterlyDue.slice(5));
-  assert.match(last(1001).text, new RegExp(`next payment ${quarterlyDue}`));
+  assert.match(last(1001).text, new RegExp(`Next payment ${quarterlyDue}`));
   await click(1001, "Save");
 
   const imported = { categories: [], subscriptions: [], cards: [], expenses: [{ id: 7, amount: 1234, currency: "SGD", merchant: "Owner only", category: "Food", spent_on: todayIn("UTC"), subscription_id: null, scheduled_due: null, deleted: 0 }], card_payments: [], reminders: [] };
