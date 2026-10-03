@@ -275,7 +275,7 @@ export class Account extends DurableObject {
         }
       }
       for (const [due, charge] of [...byDue].sort(([a], [b]) => a.localeCompare(b))) {
-        const status = charge && !charge.deleted ? "Assumed paid (unverified)" : due < this.today() ? "Unpaid · overdue" : "Unpaid";
+        const status = charge && !charge.deleted ? "Paid" : "Unpaid";
         lines.push(`${sub.merchant}: ${status} · ${this.fmt(charge?.amount ?? sub.amount, charge?.currency ?? sub.currency)} · due ${due}`);
         shownSubscriptions++;
       }

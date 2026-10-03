@@ -431,7 +431,7 @@ class SpendCue:
                     by_due.setdefault(due.isoformat(), None)
                     due = next_renewal(first_due, sub["frequency"], due + timedelta(days=1))
             for due, charge in sorted(by_due.items()):
-                status = "Assumed paid (unverified)" if charge and not charge["deleted"] else "Unpaid · overdue" if due < self.today().isoformat() else "Unpaid"
+                status = "Paid" if charge and not charge["deleted"] else "Unpaid"
                 amount = charge["amount"] if charge else sub["amount"]
                 currency = charge["currency"] if charge else sub["currency"]
                 lines.append(f"{sub['merchant']}: {status} · {self.fmt(amount, currency)} · due {due}")

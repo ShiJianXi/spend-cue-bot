@@ -157,7 +157,7 @@ test("invite, private database routing, duplicate updates, and reminders", async
   await update(1001, "/overview");
   assert.match(last(1001).text, /Total: SGD 12\.75/);
   assert.match(last(1001).text, /Scheduled subscriptions included above/);
-  assert.match(last(1001).text, /Cloud storage: Assumed paid \(unverified\) · SGD 2\.50/);
+  assert.match(last(1001).text, /Subscriptions \(scheduled payments are not verified\):\nCloud storage: Paid · SGD 2\.50/);
   await namespace.getByName("user:1001").overview(todayIn("UTC"), due);
   assert.match(last(1001).text, new RegExp(`Netflix: Unpaid · SGD 18\\.99 · due ${due}`));
   await update(1002, "/overview");
