@@ -38,13 +38,13 @@ For a visible release note, the owner sends `/announce` in the private bot chat,
 
 #### GitHub Actions deployment
 
-The [test workflow](.github/workflows/ci.yml) runs the Cloudflare and Python tests on pull requests and pushes to `main`. The separate [deploy workflow](.github/workflows/deploy.yml) runs **only when you trigger it manually** from GitHub's **Actions** tab and select `main`. It runs the tests again before deploying the same `spendcue` Worker. Pushing code alone does not change the live bot. Deployments use the secrets already stored on that Worker; do **not** copy `.dev.vars` or the Telegram bot token into GitHub.
+The [test workflow](.github/workflows/ci.yml) runs the Cloudflare and Python tests on pull requests and pushes to `main`. The separate [deploy workflow](.github/workflows/deploy.yml) runs **only when you trigger it manually** from GitHub's **Actions** tab. Select the branch whose code you want to release; the workflow tests and deploys that selected branch. Pushing code alone does not change the live bot. Every deployment updates the same `spendcue` Worker for **all users**, including deployments from a feature branch. Deployments use the secrets already stored on that Worker; do **not** copy `.dev.vars` or the Telegram bot token into GitHub.
 
 One-time deployment setup:
 
 1. In Cloudflare, create an **account API token** using the **Edit Cloudflare Workers** policy, scoped to the account that hosts SpendCue. Cloudflare's [GitHub Actions guide](https://developers.cloudflare.com/workers/ci-cd/external-cicd/github-actions/) describes this token and its permissions.
 2. In this GitHub repository, open **Settings → Secrets and variables → Actions → New repository secret**. Add `CLOUDFLARE_API_TOKEN` with that token. Add `CLOUDFLARE_ACCOUNT_ID` with the account ID shown by `npx wrangler whoami` or in the Cloudflare dashboard. Never commit either value.
-3. When you want to release an update, open **Actions → Deploy SpendCue → Run workflow**, select `main`, and check that the test and deploy steps pass. If credentials are missing, the deploy step fails without changing the live bot.
+3. When you want to release an update, open **Actions → Deploy SpendCue → Run workflow**, select the branch to deploy (`main` for merged code), and check that the test and deploy steps pass. If credentials are missing, the deploy step fails without changing the live bot.
 
 Only the owner can start `/announce`, `/invite`, or `/users`. The Worker checks Telegram's webhook secret, requires a private chat where the sender ID matches the chat ID, then compares that numeric sender ID with the deployed `OWNER_TELEGRAM_USER_ID` secret. This ID was copied from the local bot's `ALLOWED_TELEGRAM_USER_ID` when the hosted bot was first configured. Use the same Telegram account to send `/announce`; type the message when prompted, review it, and tap **Send update**. Friends cannot open that form or send announcements.
 

@@ -12,7 +12,7 @@
 - `set -a; . ./.env; set +a; python3 spendcue.py`: run the local bot after filling `.env` from `.env.example`.
 - `npx wrangler deploy --dry-run`: validate the Worker bundle without publishing it.
 
-CI runs both test suites on pull requests and pushes to `main`. Production deployment is a separate **manual** GitHub Actions workflow (`Deploy SpendCue`, `workflow_dispatch` on `main`); pushing code does not update the live bot.
+CI runs both test suites on pull requests and pushes to `main`. Production deployment is a separate **manual** GitHub Actions workflow (`Deploy SpendCue`); it deploys the branch selected when triggered. Pushing code does not update the live bot.
 
 ## Coding Style & Naming Conventions
 
