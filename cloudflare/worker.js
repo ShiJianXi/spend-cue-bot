@@ -262,6 +262,29 @@ export class Account extends DurableObject {
     if (!summary.length) lines.push("No spending recorded.");
     const scheduled = rows(this.sql, "SELECT currency,SUM(amount) total FROM expenses WHERE deleted=0 AND subscription_id IS NOT NULL AND spent_on BETWEEN ? AND ? GROUP BY currency", start, end);
     if (scheduled.length) lines.push("Scheduled subscriptions included above (payment not verified): " + scheduled.map((r) => this.fmt(r.total, r.currency)).join(", "));
+    lines.push("Subscriptions (scheduled payments are not verified):");
+    let shownSubscriptions = 0;
+    for (const sub of rows(this.sql, "SELECT * FROM subscriptions ORDER BY merchant")) {
+      const charges = rows(this.sql, "SELECT amount,currency,scheduled_due,deleted FROM expenses WHERE subscription_id=? AND scheduled_due BETWEEN ? AND ? ORDER BY scheduled_due", sub.id, start, end);
+      const byDue = new Map(charges.map((charge) => [charge.scheduled_due, charge]));
+      if (sub.active && sub.auto_from <= end) {
+        let due = nextRenewal(sub.first_due_on, sub.frequency, sub.auto_from > start ? sub.auto_from : start);
+        while (due <= end) {
+          if (!byDue.has(due)) byDue.set(due, null);
+          due = nextRenewal(sub.first_due_on, sub.frequency, addDays(due, 1));
+        }
+      }
+      for (const [due, charge] of [...byDue].sort(([a], [b]) => a.localeCompare(b))) {
+        const status = charge && !charge.deleted ? "Assumed paid (unverified)" : due < this.today() ? "Unpaid · overdue" : "Unpaid";
+        lines.push(`${sub.merchant}: ${status} · ${this.fmt(charge?.amount ?? sub.amount, charge?.currency ?? sub.currency)} · due ${due}`);
+        shownSubscriptions++;
+      }
+      if (sub.active && sub.auto_from <= end && !byDue.size) {
+        lines.push(`${sub.merchant}: No payment due in this period · next ${nextRenewal(sub.first_due_on, sub.frequency, end)}`);
+        shownSubscriptions++;
+      }
+    }
+    if (!shownSubscriptions) lines.push("No subscriptions for this period.");
     const month = end.slice(0, 7), cards = rows(this.sql, "SELECT * FROM cards WHERE active=1 AND created_on<=? ORDER BY name", monthEnd(end));
     lines.push(`Card payments · ${month} (excluded from spending total to avoid double counting):`);
     for (const card of cards) {

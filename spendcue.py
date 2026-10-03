@@ -418,6 +418,28 @@ class SpendCue:
         scheduled = self.db.execute("SELECT currency,SUM(amount) total FROM expenses WHERE deleted=0 AND subscription_id IS NOT NULL AND spent_on BETWEEN ? AND ? GROUP BY currency ORDER BY currency", (start.isoformat(), end.isoformat())).fetchall()
         if scheduled:
             lines.append("Scheduled subscriptions included above (payment not verified): " + ", ".join(self.fmt(r['total'], r['currency']) for r in scheduled))
+        lines.append("Subscriptions (scheduled payments are not verified):")
+        shown_subscriptions = 0
+        for sub in self.db.execute("SELECT * FROM subscriptions ORDER BY merchant").fetchall():
+            charges = self.db.execute("SELECT amount,currency,scheduled_due,deleted FROM expenses WHERE subscription_id=? AND scheduled_due BETWEEN ? AND ? ORDER BY scheduled_due", (sub["id"], start.isoformat(), end.isoformat())).fetchall()
+            by_due = {r["scheduled_due"]: r for r in charges}
+            auto_from = date.fromisoformat(sub["auto_from"])
+            first_due = date.fromisoformat(sub["first_due_on"])
+            if sub["active"] and auto_from <= end:
+                due = next_renewal(first_due, sub["frequency"], max(auto_from, start))
+                while due <= end:
+                    by_due.setdefault(due.isoformat(), None)
+                    due = next_renewal(first_due, sub["frequency"], due + timedelta(days=1))
+            for due, charge in sorted(by_due.items()):
+                status = "Assumed paid (unverified)" if charge and not charge["deleted"] else "Unpaid · overdue" if due < self.today().isoformat() else "Unpaid"
+                amount = charge["amount"] if charge else sub["amount"]
+                currency = charge["currency"] if charge else sub["currency"]
+                lines.append(f"{sub['merchant']}: {status} · {self.fmt(amount, currency)} · due {due}")
+                shown_subscriptions += 1
+            if sub["active"] and auto_from <= end and not by_due:
+                lines.append(f"{sub['merchant']}: No payment due in this period · next {next_renewal(first_due, sub['frequency'], end)}")
+                shown_subscriptions += 1
+        if not shown_subscriptions: lines.append("No subscriptions for this period.")
         month = end.replace(day=1)
         month_end = monthly_due(31, month)
         cards = self.db.execute("SELECT * FROM cards WHERE active=1 AND created_on<=? ORDER BY name", (month_end.isoformat(),)).fetchall()

@@ -226,6 +226,27 @@ class SpendCueTests(unittest.TestCase):
         self.bot.sync_subscriptions()
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM expenses WHERE subscription_id=1 AND deleted=0").fetchone()[0], 2)
 
+    def test_overview_shows_subscription_due_status_and_history(self):
+        self.add_subscription(name="Cloud", due="2")
+        self.add_subscription(name="Netflix", due="5")
+        self.add_subscription(name="Annual", frequency="yearly", due="2027-04-01")
+        self.bot.overview()
+        summary = self.telegram.sent[-1][0]
+        self.assertIn("Cloud: Assumed paid (unverified) · SGD 18.99 · due 2026-10-02", summary)
+        self.assertIn("Netflix: No payment due in this period", summary)
+        self.assertIn("Annual: No payment due in this period", summary)
+        self.bot.overview(date(2026, 10, 1), date(2026, 10, 5))
+        self.assertIn("Netflix: Unpaid · SGD 18.99 · due 2026-10-05", self.telegram.sent[-1][0])
+        with self.db:
+            self.db.execute("UPDATE expenses SET deleted=1 WHERE subscription_id=1")
+        self.bot.clock = lambda: datetime(2026, 11, 2, 2, tzinfo=ZoneInfo("UTC"))
+        self.bot.overview(date(2026, 10, 1), date(2026, 10, 31))
+        self.assertIn("Cloud: Unpaid · overdue · SGD 18.99 · due 2026-10-02", self.telegram.sent[-1][0])
+        self.assertIn("Netflix: Assumed paid (unverified) · SGD 18.99 · due 2026-10-05", self.telegram.sent[-1][0])
+        self.callback("subs:toggle:2")
+        self.bot.overview(date(2026, 10, 1), date(2026, 10, 31))
+        self.assertIn("Netflix: Assumed paid (unverified) · SGD 18.99 · due 2026-10-05", self.telegram.sent[-1][0])
+
     def test_card_purchases_and_payments_have_separate_totals_and_overdue_status(self):
         self.add_expense(amount="10")
         self.add_subscription(due="2")

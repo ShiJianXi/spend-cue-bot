@@ -157,8 +157,12 @@ test("invite, private database routing, duplicate updates, and reminders", async
   await update(1001, "/overview");
   assert.match(last(1001).text, /Total: SGD 12\.75/);
   assert.match(last(1001).text, /Scheduled subscriptions included above/);
+  assert.match(last(1001).text, /Cloud storage: Assumed paid \(unverified\) · SGD 2\.50/);
+  await namespace.getByName("user:1001").overview(todayIn("UTC"), due);
+  assert.match(last(1001).text, new RegExp(`Netflix: Unpaid · SGD 18\\.99 · due ${due}`));
   await update(1002, "/overview");
   assert.match(last(1002).text, /No spending recorded/);
+  assert.match(last(1002).text, /No subscriptions for this period/);
   await namespace.getByName("user:1001").reminders();
   await namespace.getByName("user:1001").reminders();
   assert.equal(sent.filter((m) => m.chat_id === "1001" && m.text.startsWith("Reminder · Netflix")).length, 1);
