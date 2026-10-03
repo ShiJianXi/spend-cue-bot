@@ -8,6 +8,7 @@ const nextMonth = (month) => `${new Date(Date.UTC(Number(month.slice(0, 4)), Num
 const monthStart = (day) => `${day.slice(0, 7)}-01`;
 const monthEnd = (day) => monthDue(31, day);
 const csvCell = (value) => `"${String(csvSafe(value ?? "")).replaceAll('"', '""')}"`;
+const categoryIcon = { Food: "🍽️", Transport: "🚆", Shopping: "🛍️", Bills: "🏠", Other: "✨" };
 
 async function telegram(env, method, data) {
   const apiFetch = env.TELEGRAM_API ? env.TELEGRAM_API.fetch.bind(env.TELEGRAM_API) : fetch;
@@ -22,7 +23,12 @@ async function send(env, userId, text, buttons, prompt = false) {
   const data = { chat_id: userId, text: text.slice(0, 4096) };
   if (buttons?.length) {
     const keys = buttons.map(([label, action]) => ({ text: label, callback_data: action }));
-    data.reply_markup = { inline_keyboard: keys.length > 3 ? keys.map((key) => [key]) : [keys] };
+    const wide = (action) => /^(nav:home|nav:manage)$/.test(action) || /:action:cancel$/.test(action);
+    data.reply_markup = { inline_keyboard: keys.reduce((lines, key) => {
+      if (wide(key.callback_data) || !lines.length || lines.at(-1).length === 2 || wide(lines.at(-1)[0].callback_data)) lines.push([key]);
+      else lines.at(-1).push(key);
+      return lines;
+    }, []) };
   } else if (prompt) data.reply_markup = { force_reply: true };
   return telegram(env, "sendMessage", data);
 }
@@ -169,32 +175,36 @@ export class Account extends DurableObject {
     const p = JSON.parse(session.payload);
     const choices = (entries, prefix) => this.choices(session, entries, prefix);
     if (kind === "expense" || kind === "expense_edit") {
-      if (step === "category") await this.say("Choose a spending category:", choices(rows(this.sql, "SELECT id,name FROM categories WHERE active=1 ORDER BY id").map((r) => [r.name, r.id]), "cat"));
-      else if (step === "amount") await this.say("Enter the amount, for example 24.80 or USD 24.80:", null, true);
-      else if (step === "merchant") await this.say("What was this for? Enter a merchant or short note:", null, true);
-      else if (step === "date") await this.say("When was it spent?", choices([["Today", "today"], ["Yesterday", "yesterday"], ["Enter date", "custom"]], "date"));
-      else if (step === "date_input") await this.say("Enter the spending date as YYYY-MM-DD:", null, true);
-      else if (step === "edit_field") await this.say("What would you like to change?", choices([["Category", "category"], ["Amount", "amount"], ["Merchant", "merchant"], ["Date", "date"]], "field"));
-      else if (step === "review") await this.say(`Review · ${p.merchant} · ${this.fmt(p.amount, p.currency)} · ${p.category} · ${p.spent_on}`, choices([[kind === "expense" ? "Save expense" : "Save changes", "save"], ["Edit", "edit"], ["Cancel", "cancel"]], "action"));
+      const title = kind === "expense" ? "🧾 Add spending" : "✏️ Edit spending";
+      const progress = (number) => kind === "expense" ? ` · ${number}/4` : "";
+      if (step === "category") await this.say(`${title}${progress(1)}\nPick a category 👇`, choices(rows(this.sql, "SELECT id,name FROM categories WHERE active=1 ORDER BY id").map((r) => [`${categoryIcon[r.name] || "🏷️"} ${r.name}`, r.id]), "cat"));
+      else if (step === "amount") await this.say(`${title}${progress(2)}\nHow much was it?\nExample: 24.80 or USD 24.80`, null, true);
+      else if (step === "merchant") await this.say(`${title}${progress(3)}\nWhat was it for? Send a merchant or short note.`, null, true);
+      else if (step === "date") await this.say(`${title}${progress(4)}\nWhen did you spend it?`, choices([["📅 Today", "today"], ["↩️ Yesterday", "yesterday"], ["✍️ Other date", "custom"]], "date"));
+      else if (step === "date_input") await this.say(`${title}${progress(4)}\nSend the date as YYYY-MM-DD.`, null, true);
+      else if (step === "edit_field") await this.say(`${title}\nWhat should change?`, choices([["🏷️ Category", "category"], ["💰 Amount", "amount"], ["📝 Note", "merchant"], ["📅 Date", "date"]], "field"));
+      else if (step === "review") await this.say(`${title} · Ready to save?\n\n${p.merchant}\n${this.fmt(p.amount, p.currency)} · ${p.category}\n📅 ${p.spent_on}`, choices([[kind === "expense" ? "Save expense" : "Save changes", "save"], ["Edit", "edit"], ["Cancel", "cancel"]], "action"));
     } else if (kind === "expense_undo") await this.say("Delete this expense from spending totals?", choices([["Undo expense", "save"], ["Cancel", "cancel"]], "action"));
     else if (["card_add", "card_due", "category_add", "category_rename"].includes(kind)) {
-      if (step === "name") await this.say(kind === "card_add" ? "Enter a card nickname (never a card number):" : "Enter the category name:", null, true);
-      else if (step === "due_day") await this.say("What day of each month is this card due? Enter 1–31:", null, true);
-      else if (step === "review") await this.say(`Review · ${p.name}${p.due_day ? ` · due day ${p.due_day}` : ""}`, choices([["Save", "save"], ["Cancel", "cancel"]], "action"));
+      if (step === "name") await this.say(kind === "card_add" ? "💳 New card · 1/2\nSend a nickname, like Visa. Never send a card number." : `🏷️ ${kind === "category_rename" ? "Rename category" : "New category"}\nSend the category name.`, null, true);
+      else if (step === "due_day") await this.say(`💳 ${p.name}${kind === "card_add" ? " · 2/2" : ""}\nWhat day is the bill due each month? Send 1–31.`, null, true);
+      else if (step === "review") await this.say(`Ready to save?\n\n${p.name}${p.due_day ? `\n📅 Due on day ${p.due_day} each month` : ""}${kind === "card_add" ? "\n🔔 Reminder: 7 days before and on the due date" : ""}`, choices([["Save", "save"], ["Cancel", "cancel"]], "action"));
     } else if (kind === "payment") {
       if (step === "card") {
         const month = this.today().slice(0, 7);
         const cards = rows(this.sql, "SELECT * FROM cards WHERE active=1 ORDER BY name").filter((r) => !this.cardPaid(r.id, month));
-        await this.say(`Which card did you pay for ${month}?`, choices(cards.map((r) => [r.name, r.id]), "card"));
-      } else if (step === "amount") await this.say("How much did you pay? For example 450 or USD 450:", null, true);
-      else if (step === "review") await this.say(`Review · ${p.card_name} · ${this.fmt(p.amount, p.currency)} paid ${p.paid_on} for ${p.cycle_month}. This marks the month Paid.`, choices([["Record payment", "save"], ["Cancel", "cancel"]], "action"));
+        await this.say(`💳 Record payment · 1/2\nWhich card did you pay for ${month}?`, choices(cards.map((r) => [`💳 ${r.name}`, r.id]), "card"));
+      } else if (step === "amount") await this.say(`💳 ${p.card_name} · 2/2\nHow much did you pay? Example: 450 or USD 450.`, null, true);
+      else if (step === "review") await this.say(`💳 Ready to mark paid?\n\n${p.card_name} · ${p.cycle_month}\n${this.fmt(p.amount, p.currency)} paid on ${p.paid_on}\n\nCard payments stay outside spending totals.`, choices([["Record payment", "save"], ["Cancel", "cancel"]], "action"));
     } else if (kind === "subscription" || kind === "subscription_edit") {
-      if (step === "name") await this.say("Enter the subscription name:", null, true);
-      else if (step === "amount") await this.say("Enter the amount per renewal:", null, true);
-      else if (step === "frequency") await this.say("How often is it charged?", choices([["Monthly", "monthly"], ["Quarterly", "quarterly"], ["Yearly", "yearly"]], "frequency"));
-      else if (step === "due_on") await this.say({ monthly: "Enter the payment day each month (1–31):", quarterly: "Enter the payment month and day as MM-DD (for example 10-15):", yearly: "Enter the next payment date as YYYY-MM-DD (today or later):" }[p.frequency], null, true);
-      else if (step === "edit_field") await this.say("What would you like to change?", choices([["Name", "name"], ["Amount", "amount"], ["Schedule", "frequency"]], "field"));
-      else if (step === "review") await this.say(`Review subscription · ${p.merchant} · ${this.fmt(p.amount, p.currency)} ${p.frequency} · next payment ${nextRenewal(p.first_due_on, p.frequency, this.today())}. Scheduled charges are added to spending automatically.`, choices([["Save", "save"], ["Edit", "edit"], ["Cancel", "cancel"]], "action"));
+      const title = kind === "subscription" ? "🔁 New subscription" : "✏️ Edit subscription";
+      const progress = (number) => kind === "subscription" ? ` · ${number}/4` : "";
+      if (step === "name") await this.say(`${title}${progress(1)}\nWhat is it called?`, null, true);
+      else if (step === "amount") await this.say(`${title}${progress(2)}\nHow much per renewal?`, null, true);
+      else if (step === "frequency") await this.say(`${title}${progress(3)}\nHow often is it charged?`, choices([["Monthly", "monthly"], ["Quarterly", "quarterly"], ["Yearly", "yearly"]], "frequency"));
+      else if (step === "due_on") await this.say(`${title}${progress(4)}\n${{ monthly: "Enter the payment day each month (1–31):", quarterly: "Enter the payment month and day as MM-DD (for example 10-15):", yearly: "Enter the next payment date as YYYY-MM-DD (today or later):" }[p.frequency]}`, null, true);
+      else if (step === "edit_field") await this.say(`${title}\nWhat should change?`, choices([["Name", "name"], ["Amount", "amount"], ["Schedule", "frequency"]], "field"));
+      else if (step === "review") await this.say(`🔁 Ready to save?\n\n${p.merchant}\n${this.fmt(p.amount, p.currency)} · ${p.frequency}\n📅 Next payment ${nextRenewal(p.first_due_on, p.frequency, this.today())}\n\nScheduled charges are added to spending automatically.`, choices([["Save", "save"], ["Edit", "edit"], ["Cancel", "cancel"]], "action"));
     } else if (kind === "announcement") {
       if (step === "body") await this.say("Write the update to send to everyone using this bot (up to 1,000 characters):", null, true);
       else if (step === "review") await this.say(`Send this update to all active users?\n\n${p.body}`, choices([["Send update", "save"], ["Cancel", "cancel"]], "action"));
@@ -213,35 +223,51 @@ export class Account extends DurableObject {
     }
   }
 
-  async home() { await this.say("SpendCue · choose what to do:", [["Add spending", "nav:add"], ["Credit cards", "nav:cards"], ["Subscriptions", "nav:subs"], ["Overview", "nav:overview"], ["Manage", "nav:manage"]]); }
+  async home() {
+    this.syncSubscriptions();
+    const today = this.today(), month = today.slice(0, 7);
+    const totals = rows(this.sql, "SELECT currency,SUM(amount) total FROM expenses WHERE deleted=0 AND spent_on BETWEEN ? AND ? GROUP BY currency ORDER BY currency", `${month}-01`, today);
+    const cards = rows(this.sql, "SELECT id FROM cards WHERE active=1 AND created_on<=?", today);
+    const unpaid = cards.filter((card) => !this.cardPaid(card.id, month)).length;
+    const next = rows(this.sql, "SELECT * FROM subscriptions WHERE active=1").map((sub) => [nextRenewal(sub.first_due_on, sub.frequency, today), sub.merchant]).sort(([a], [b]) => a.localeCompare(b))[0];
+    await this.say([
+      "✨ SpendCue", "Your money at a glance", "",
+      `📅 ${new Intl.DateTimeFormat("en-US", { month: "long", year: "numeric", timeZone: "UTC" }).format(new Date(`${month}-01T00:00:00Z`))} spending`,
+      totals.length ? totals.map((r) => `  ${this.fmt(r.total, r.currency)}`).join("\n") : "  Nothing logged yet — start with one expense!",
+      `💳 Cards: ${unpaid} unpaid this month${cards.length ? ` · ${cards.length - unpaid} paid` : ""}`,
+      next ? `🔁 Next renewal: ${next[1]} · ${next[0]}` : "🔁 No active subscriptions",
+      "", "Choose what to do 👇",
+    ].join("\n"), [["➕ Add spending", "nav:add"], ["📊 Overview", "nav:overview"], ["💳 Credit cards", "nav:cards"], ["🔁 Subscriptions", "nav:subs"], ["⚙️ Manage", "nav:manage"]]);
+  }
   async cards() {
     const today = this.today(), month = today.slice(0, 7);
     const cards = rows(this.sql, "SELECT * FROM cards WHERE active=1 ORDER BY name");
-    const lines = [`Credit cards · ${month}`];
+    const lines = [`💳 Credit cards · ${month}`, "Card payments are tracked separately from spending.", ""];
     for (const card of cards) {
       const paid = this.cardPaid(card.id, month), due = monthDue(card.due_day, month);
       const status = paid ? "Paid" : due < today ? "Unpaid · overdue" : "Unpaid";
-      lines.push(`${card.name}: ${status} · due ${due} · reminder ${card.reminder_days ? `${card.reminder_days} days before` : "due day only"}${paid ? ` · ${this.fmt(paid.amount, paid.currency)} recorded` : ""}`);
+      lines.push(`${paid ? "✅" : due < today ? "🔴" : "⏳"} ${card.name}: ${status}${paid ? ` · ${this.fmt(paid.amount, paid.currency)} recorded` : ""}`);
+      lines.push(`   Due ${due} · reminder ${card.reminder_days ? `${card.reminder_days} days before` : "due day only"}`);
     }
-    if (!cards.length) lines.push("No cards yet.");
-    await this.say(lines.join("\n"), [["Add card", "cards:add"], ["Record payment", "cards:pay"], ...cards.slice(0, 8).map((r) => [`Settings · ${r.name.slice(0, 20)}`, `cards:view:${r.id}`]), ["Back", "nav:home"]]);
+    if (!cards.length) lines.push("No cards yet. Add one to track its monthly due date.");
+    await this.say(lines.join("\n"), [["➕ Add card", "cards:add"], ["✅ Record payment", "cards:pay"], ...cards.slice(0, 8).map((r) => [`⚙️ ${r.name.slice(0, 20)}`, `cards:view:${r.id}`]), ["🏠 Menu", "nav:home"]]);
   }
   async subscriptions() {
     this.syncSubscriptions();
     const subs = rows(this.sql, "SELECT * FROM subscriptions ORDER BY merchant");
-    const lines = ["Subscriptions", ...subs.map((r) => `#${r.id} ${r.merchant} · ${this.fmt(r.amount, r.currency)} ${r.frequency} · next ${nextRenewal(r.first_due_on, r.frequency, this.today())} · ${r.active ? "Active" : "Cancelled"}`)];
-    if (!subs.length) lines.push("None yet.");
-    await this.say(lines.join("\n"), [["Add subscription", "subs:add"], ...subs.slice(0, 8).map((r) => [`Edit ${r.merchant.slice(0, 20)}`, `subs:view:${r.id}`]), ["Back", "nav:home"]]);
+    const lines = ["🔁 Subscriptions", "Expected renewals enter spending on their due date.", "", ...subs.map((r) => `${r.active ? "🟢" : "⚪"} ${r.merchant} · ${this.fmt(r.amount, r.currency)}\n   ${r.frequency} · ${r.active ? `next ${nextRenewal(r.first_due_on, r.frequency, this.today())}` : "cancelled"}`)];
+    if (!subs.length) lines.push("None yet. Add one to see renewals here.");
+    await this.say(lines.join("\n"), [["➕ Add subscription", "subs:add"], ...subs.slice(0, 8).map((r) => [`⚙️ ${r.merchant.slice(0, 20)}`, `subs:view:${r.id}`]), ["🏠 Menu", "nav:home"]]);
   }
-  async manage() { await this.say("Manage your records:", [["Categories", "manage:categories"], ["Edit spending", "manage:expenses"], ["Export CSV", "nav:export"], ["Back", "nav:home"]]); }
+  async manage() { await this.say("⚙️ Manage\nFine-tune your records or take a copy of your data.", [["🏷️ Categories", "manage:categories"], ["✏️ Edit spending", "manage:expenses"], ["📤 Export CSV", "nav:export"], ["🏠 Menu", "nav:home"]]); }
   async categories() {
     const list = rows(this.sql, "SELECT name FROM categories WHERE active=1 ORDER BY id").map((r) => r.name).join(", ");
-    await this.say(`Categories: ${list}`, [["Add category", "category:add"], ["Rename category", "category:rename"], ["Back", "nav:manage"]]);
+    await this.say(`🏷️ Categories\n${list}`, [["➕ Add category", "category:add"], ["✏️ Rename category", "category:rename"], ["↩️ Back", "nav:manage"]]);
   }
   async expensesToEdit() {
     const list = rows(this.sql, "SELECT * FROM expenses WHERE deleted=0 ORDER BY id DESC LIMIT 8");
     if (!list.length) return this.say("No expenses to edit.", [["Back", "nav:manage"]]);
-    await this.say("Choose an expense:", [...list.map((r) => [`#${r.id} ${r.merchant.slice(0, 20)} ${this.fmt(r.amount, r.currency)}`, `expense:edit:${r.id}`]), ["Back", "nav:manage"]]);
+    await this.say("✏️ Recent spending\nChoose an expense to change:", [...list.map((r) => [`${r.merchant.slice(0, 18)} · ${this.fmt(r.amount, r.currency)}`, `expense:edit:${r.id}`]), ["↩️ Back", "nav:manage"]]);
   }
   async months() {
     const months = [];
@@ -251,18 +277,19 @@ export class Account extends DurableObject {
       months.push([label, `overview:month:${day.slice(0, 7)}`]);
       day = monthStart(addDays(day, -1));
     }
-    await this.say("Choose a month. Older records remain available through Date range.", [...months, ["Older date range", "overview:range"], ["Back", "nav:overview"]]);
+    await this.say("🗓️ Pick a month\nOlder records are available through Date range.", [...months, ["✍️ Older date range", "overview:range"], ["↩️ Back", "nav:overview"]]);
   }
   async overview(start = monthStart(this.today()), end = this.today()) {
     this.syncSubscriptions();
     const summary = rows(this.sql, "SELECT currency,category,SUM(amount) total FROM expenses WHERE deleted=0 AND spent_on BETWEEN ? AND ? GROUP BY currency,category ORDER BY currency,category", start, end);
-    const lines = [`Spending · ${start} to ${end}`], totals = new Map();
-    for (const r of summary) { totals.set(r.currency, (totals.get(r.currency) || 0) + r.total); lines.push(`${r.category}: ${this.fmt(r.total, r.currency)}`); }
+    const lines = [`📊 Spending · ${start} to ${end}`, ""], totals = new Map();
+    for (const r of summary) { totals.set(r.currency, (totals.get(r.currency) || 0) + r.total); lines.push(`• ${r.category}: ${this.fmt(r.total, r.currency)}`); }
+    if (summary.length) lines.push("");
     for (const [code, total] of [...totals].sort()) lines.push(`Total: ${this.fmt(total, code)}`);
     if (!summary.length) lines.push("No spending recorded.");
     const scheduled = rows(this.sql, "SELECT currency,SUM(amount) total FROM expenses WHERE deleted=0 AND subscription_id IS NOT NULL AND spent_on BETWEEN ? AND ? GROUP BY currency", start, end);
     if (scheduled.length) lines.push("Scheduled subscriptions included above (payment not verified): " + scheduled.map((r) => this.fmt(r.total, r.currency)).join(", "));
-    lines.push("Subscriptions (scheduled payments are not verified):");
+    lines.push("", "🔁 Subscriptions (scheduled payments are not verified):");
     let shownSubscriptions = 0;
     for (const sub of rows(this.sql, "SELECT * FROM subscriptions ORDER BY merchant")) {
       const charges = rows(this.sql, "SELECT amount,currency,scheduled_due,deleted FROM expenses WHERE subscription_id=? AND scheduled_due BETWEEN ? AND ? ORDER BY scheduled_due", sub.id, start, end);
@@ -276,7 +303,7 @@ export class Account extends DurableObject {
       }
       for (const [due, charge] of [...byDue].sort(([a], [b]) => a.localeCompare(b))) {
         const status = charge && !charge.deleted ? "Paid" : "Unpaid";
-        lines.push(`${sub.merchant}: ${status} · ${this.fmt(charge?.amount ?? sub.amount, charge?.currency ?? sub.currency)} · due ${due}`);
+        lines.push(`${status === "Paid" ? "✅" : "⏳"} ${sub.merchant}: ${status} · ${this.fmt(charge?.amount ?? sub.amount, charge?.currency ?? sub.currency)} · due ${due}`);
         shownSubscriptions++;
       }
       if (sub.active && sub.auto_from <= end && !byDue.size) {
@@ -286,29 +313,29 @@ export class Account extends DurableObject {
     }
     if (!shownSubscriptions) lines.push("No subscriptions for this period.");
     const month = end.slice(0, 7), cards = rows(this.sql, "SELECT * FROM cards WHERE active=1 AND created_on<=? ORDER BY name", monthEnd(end));
-    lines.push(`Card payments · ${month} (excluded from spending total to avoid double counting):`);
+    lines.push("", `💳 Card payments · ${month} (excluded from spending total to avoid double counting):`);
     for (const card of cards) {
       const paid = this.cardPaid(card.id, month);
-      lines.push(`${card.name}: ${paid ? `Paid · ${this.fmt(paid.amount, paid.currency)} recorded` : "Unpaid"} · due ${monthDue(card.due_day, month)}`);
+      lines.push(`${paid ? "✅" : "⏳"} ${card.name}: ${paid ? `Paid · ${this.fmt(paid.amount, paid.currency)} recorded` : "Unpaid"} · due ${monthDue(card.due_day, month)}`);
     }
     if (!cards.length) lines.push("No cards for this month.");
-    await this.say(lines.join("\n"), [["This week", "overview:week"], ["This month", "overview:month"], ["Recent months", "overview:months"], ["Date range", "overview:range"], ["Upcoming payments", "overview:upcoming"], ["Back", "nav:home"]]);
+    await this.say(lines.join("\n"), [["🗓️ This week", "overview:week"], ["📅 This month", "overview:month"], ["⏪ Past months", "overview:months"], ["✍️ Date range", "overview:range"], ["🔔 Upcoming", "overview:upcoming"], ["🏠 Menu", "nav:home"]]);
   }
   async upcoming() {
     this.syncSubscriptions();
     const today = this.today(), end = addDays(today, 30), items = [];
     for (const sub of rows(this.sql, "SELECT * FROM subscriptions WHERE active=1")) {
       const due = nextRenewal(sub.first_due_on, sub.frequency, today);
-      if (due <= end) items.push([due, `${sub.merchant} · ${this.fmt(sub.amount, sub.currency)} expected`]);
+      if (due <= end) items.push([due, `🔁 ${sub.merchant} · ${this.fmt(sub.amount, sub.currency)} expected`]);
     }
     for (const card of rows(this.sql, "SELECT * FROM cards WHERE active=1")) {
       for (const month of [today.slice(0, 7), nextMonth(today.slice(0, 7))]) {
         const due = monthDue(card.due_day, month);
-        if (due <= end && !this.cardPaid(card.id, month)) items.push([due, `${card.name} · unpaid card payment`]);
+        if (due <= end && !this.cardPaid(card.id, month)) items.push([due, `💳 ${card.name} · unpaid card payment`]);
       }
     }
     items.sort(([a], [b]) => a.localeCompare(b));
-    await this.say(items.length ? `Upcoming payments:\n${items.map(([d, v]) => `${d}: ${v}`).join("\n")}` : "No upcoming payments in the next 30 days.", [["Back", "nav:overview"]]);
+    await this.say(items.length ? `🔔 Coming up · next 30 days\n\n${items.map(([d, v]) => `${d}  ${v}`).join("\n")}` : "🔔 All clear! No upcoming payments in the next 30 days.", [["💳 Credit cards", "nav:cards"], ["🔁 Subscriptions", "nav:subs"], ["↩️ Back", "nav:overview"]]);
   }
   async exportCsv() {
     const out = [["type", "id", "name", "amount_minor", "currency", "date_or_day", "category_or_status"]];
@@ -340,7 +367,7 @@ export class Account extends DurableObject {
     const command = raw.startsWith("/") ? raw.split(/\s+/, 1)[0].split("@")[0] : raw;
     const routes = { "/start": "home", "/menu": "home", menu: "home", "/add": "add", add: "add", "/cards": "cards", "/cc": "cards", "/creditcard": "cards", "/subs": "subs", "/subscriptions": "subs", "/overview": "overview", "/manage": "manage", "/export": "export" };
     if (command === "/cancel" || command === "cancel") { this.clear(); await this.home(); return; }
-    if (command === "/help") { await this.say(`Use /add, /cards, /subs, /overview, or /manage. /menu shows buttons; /cancel stops the current form. /export sends a CSV.${this.user() === String(this.env.OWNER_TELEGRAM_USER_ID) ? " Owner: /invite, /users, /announce." : ""}`); return; }
+    if (command === "/help") { await this.say(`✨ SpendCue quick guide\n/add · log spending\n/cards · track card payments\n/subs · manage renewals\n/overview · see your spending\n/manage · edit or export\n\n/cancel stops the current form.${this.user() === String(this.env.OWNER_TELEGRAM_USER_ID) ? "\nOwner: /invite, /users, /announce." : ""}`, [["🏠 Open menu", "nav:home"]]); return; }
     if (this.user() === String(this.env.OWNER_TELEGRAM_USER_ID) && command === "/invite") {
       const code = this.createInvite();
       const bot = await telegram(this.env, "getMe", {});
@@ -351,7 +378,7 @@ export class Account extends DurableObject {
     if (this.user() === String(this.env.OWNER_TELEGRAM_USER_ID) && command === "/announce") { await this.start("announcement", "body"); return; }
     if (routes[command]) { this.clear(); await this.navigate(routes[command]); return; }
     const session = this.session();
-    if (!session) { await this.say("Choose a menu option or send /help.", [["Open menu", "nav:home"]]); return; }
+    if (!session) { await this.say("I work best with buttons. Tap below to get started 👇", [["🏠 Open menu", "nav:home"]]); return; }
     const { kind, step } = session;
     const p = JSON.parse(session.payload);
     try {
@@ -549,7 +576,7 @@ export class Account extends DurableObject {
         expenseId = p.id; label = "Updated expense";
       } else if (kind === "expense_undo") {
         this.sql.exec("UPDATE expenses SET deleted=1 WHERE id=?", p.expense_id);
-        this.clear(); await this.say("Expense removed from spending totals."); return;
+        this.clear(); await this.say("↩️ Expense removed from spending totals.", [["📊 Overview", "nav:overview"], ["🏠 Menu", "nav:home"]]); return;
       } else if (kind === "card_add") {
         this.sql.exec("INSERT INTO cards(name,due_day,created_on) VALUES(?,?,?)", p.name, p.due_day, this.today());
         this.clear(); await this.cards(); return;
@@ -569,7 +596,7 @@ export class Account extends DurableObject {
           this.clear(); await this.say("That card is already paid, or the month changed. Open /cards and start again."); return;
         }
         this.sql.exec("INSERT INTO card_payments(card_id,cycle_month,amount,currency,paid_on) VALUES(?,?,?,?,?)", card.id, p.cycle_month, p.amount, p.currency, this.today());
-        this.clear(); await this.say(`${card.name} marked Paid for ${p.cycle_month}: ${this.fmt(p.amount, p.currency)} recorded. This payment is excluded from spending totals.`); return;
+        this.clear(); await this.say(`✅ ${card.name} marked Paid for ${p.cycle_month}\n${this.fmt(p.amount, p.currency)} recorded.\n\nThis payment is excluded from spending totals.`, [["💳 Credit cards", "nav:cards"], ["🏠 Menu", "nav:home"]]); return;
       } else if (kind === "subscription") {
         this.sql.exec("INSERT INTO subscriptions(merchant,amount,currency,frequency,first_due_on,auto_from) VALUES(?,?,?,?,?,?)", p.merchant, p.amount, p.currency, p.frequency, p.first_due_on, p.auto_from);
         this.clear(); await this.subscriptions(); return;
@@ -582,7 +609,7 @@ export class Account extends DurableObject {
         this.clear(); await this.say(`Update queued for ${count} active user${count === 1 ? "" : "s"}.`); return;
       } else return;
       this.clear();
-      await this.say(`${label} #${expenseId}: ${p.merchant} · ${this.fmt(p.amount, p.currency)} · ${p.category} · ${p.spent_on}`, [["Edit", `expense:edit:${expenseId}`], ["Undo", `expense:undo:${expenseId}`]]);
+      await this.say(`✅ ${label} #${expenseId}: ${p.merchant}\n${this.fmt(p.amount, p.currency)} · ${p.category} · ${p.spent_on}`, [["✏️ Edit", `expense:edit:${expenseId}`], ["↩️ Undo", `expense:undo:${expenseId}`], ["➕ Add another", "nav:add"], ["📊 Overview", "nav:overview"]]);
     } catch (error) {
       if (!/UNIQUE constraint failed/i.test(String(error)) || !["card_add", "category_add", "category_rename"].includes(kind)) throw error;
       await this.say("That name already exists. Enter a different one.");
@@ -597,7 +624,7 @@ export class Account extends DurableObject {
     if (row(this.sql, "SELECT 1 ok FROM reminders WHERE kind=? AND item_id=? AND due_on=? AND reminder_on=?", kind, id, due, today)) return;
     this.sql.exec("INSERT OR IGNORE INTO reminders VALUES(?,?,?,?)", kind, id, due, today);
     const days = Math.round((Date.parse(`${due}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86400000);
-    await this.say(`Reminder · ${label} on ${due}${days === 0 ? " (today)" : ` (in ${days} day${days === 1 ? "" : "s"})`}`);
+    await this.say(`Reminder · ${label} on ${due}${days === 0 ? " (today)" : ` (in ${days} day${days === 1 ? "" : "s"})`}`, kind === "card" ? [["✅ Record payment", "cards:pay"], ["💳 View cards", "nav:cards"]] : [["🔁 View subscriptions", "nav:subs"]]);
   }
   async reminders() {
     if (this.get("authorized") !== "1") return;
@@ -631,7 +658,7 @@ export class Account extends DurableObject {
     this.sql.exec("INSERT INTO processed_updates(update_id) VALUES(?)", update.update_id);
     try {
       await this.flushOutbox();
-      if (update.message?.photo?.length) await this.say("Receipt extraction is off. Use /add to enter the purchase.");
+      if (update.message?.photo?.length) await this.say("📷 I can't read receipts yet. Add this purchase using the short form instead.", [["➕ Add spending", "nav:add"]]);
       else if (update.message) await this.handleText(update.message.text || "");
       else if (update.callback_query) await this.callback(update.callback_query, update.update_id);
       await this.ensureAlarm();

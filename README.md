@@ -79,7 +79,7 @@ No Gemini key, AI account, or Python package installation is needed.
 
 ## Use
 
-Send `/menu` or `/start` to open the five main options. `/help` shows a short command list, `/cancel` stops the current form, and `/export` sends a CSV. You can also type `add` or use `/add` to begin an expense.
+Send `/menu` or `/start` to open the five main options. On the hosted Cloudflare bot, this opens a compact dashboard with this month's spending (separate by currency), card payment status, and the next subscription renewal. Buttons are arranged in short rows, and forms show progress as you fill them in. Saved spending offers **Edit**, **Undo**, **Add another**, and **Overview**; reminders link to the relevant card or subscription screen. The separate local Python bot keeps its original text layout. `/help` shows a short command list, `/cancel` stops the current form, and `/export` sends a CSV. You can also type `add` or use `/add` to begin an expense.
 
 ### Spending: `/add`
 
